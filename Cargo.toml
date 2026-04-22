@@ -13,6 +13,15 @@ description = "GPU-native Circle STARK prover for RTX 5090"
 name = "vortexstark"
 path = "src/lib.rs"
 
+[features]
+default = []
+# Drop BLOWUP_BITS from 2 to 1 (2x vs 4x evaluation blowup). Used to measure the
+# 1B-element (log_n=30) headline benchmark; the default BLOWUP_BITS=2 hits a
+# hard assertion because log_eval=32 exceeds M31's circle subgroup order of 2^31.
+# Security drops from 160-bit to 80-bit when this feature is active — not for
+# production use.
+bench-max-size = []
+
 [[bin]]
 name = "vortex-bench"
 path = "src/bin/bench.rs"

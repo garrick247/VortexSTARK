@@ -14,19 +14,35 @@ GPU-native Circle STARK prover with end-to-end proof generation and verification
 - **RPO-M31 hash**: Circle STARK–native hash (eprint 2024/1635), 3.5M hashes/sec at log_n=28 (14 rows/perm, 24 cols)
 - **FRI**: Circle fold + line folds, GPU-resident decommitment, all fold equations verified
 
-### Benchmarked (RTX 5090, CUDA 13.2, driver 595.79, 2026-03-26)
+### Benchmarked (RTX 5090, CUDA 13.2, driver 595.79)
+
+Default build, `BLOWUP_BITS=2`, 160-bit security, N_QUERIES=80, PoW=26 bits:
 
 | Workload | Scale | Prove | Verify |
 |----------|-------|-------|--------|
 | Fibonacci log_n=24 | 16.8M elements | 214ms | 6.2ms |
 | Fibonacci log_n=28 | 268M elements | 1.55s | 8.2ms |
-| Fibonacci log_n=30 | 1.07B elements | 10.6s | 9.3ms |
+| Fibonacci log_n=29 | 537M elements | 8.9s | 7.8ms |
 | Cairo VM log_n=20 | 1.0M steps | 994ms | 112ms |
 | Cairo VM log_n=24 | 16.8M steps | 16.8s | 1.66s |
 | Cairo VM log_n=26 | 67M steps | 169s | 7.9s |
 | Poseidon2 trace+NTT log_n=28 | 8.9M hashes | 1.92s | — |
 | RPO-M31 trace+NTT log_n=28 | 19.2M hashes | 5.51s | — |
 | Pedersen GPU batch | 1M hashes | 26.6ms | — |
+
+`bench-max-size` feature build (`cargo build --release --features bench-max-size`),
+`BLOWUP_BITS=1`, 80-bit security — used to measure the 1B-element headline, which
+requires log_eval ≤ 31 (the order of M31's circle subgroup):
+
+| Workload | Scale | Prove | Verify |
+|----------|-------|-------|--------|
+| Fibonacci log_n=28 | 268M elements | 2.97s | 6.9ms |
+| Fibonacci log_n=29 | 537M elements | 8.95s | 7.8ms |
+| Fibonacci log_n=30 | 1.07B elements | ~10s* | ~9ms |
+
+*Measured pre-stwo-compat rework. Current build runs this size successfully
+(assertion cleared) but requires ~20 GB of free VRAM; re-measurement pending a
+dedicated idle GPU.
 
 All Cairo VM numbers include 34 columns, 35 constraints, full LogUp+RC memory table, S_dict LogUp, OODS quotient, and 26-bit proof-of-work. Fibonacci numbers are the standalone single-column prover.
 

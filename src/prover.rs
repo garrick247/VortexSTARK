@@ -83,7 +83,14 @@ pub fn prewarm_eval_pool(log_n: u32) {
 /// FriVerifier compatibility: log_eval_size = log_n + BLOWUP_BITS; column_bound uses
 /// CirclePolyDegreeBound::new(log_n + BLOWUP_BITS); n_inner_layers = log_eval_size - 1 - 3.
 /// All CUDA kernels accept log_eval at runtime — no kernel recompile needed.
+///
+/// With the `bench-max-size` feature, BLOWUP_BITS drops to 1 so that log_eval fits
+/// the M31 circle subgroup (max order 2^31) for log_n=30 benchmarks. Security drops
+/// to 80-bit; not for production use.
+#[cfg(not(feature = "bench-max-size"))]
 pub const BLOWUP_BITS: u32 = 2; // blowup factor = 4 → 160-bit security (Model A/C)
+#[cfg(feature = "bench-max-size")]
+pub const BLOWUP_BITS: u32 = 1; // blowup factor = 2 → 80-bit security; unlocks log_n=30
 
 /// Number of queries for ~160-bit security (blowup=4, 2 bits/query).
 /// 80 queries × 2 bits/query = 160 bits (Model A/C).
