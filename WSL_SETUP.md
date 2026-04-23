@@ -50,6 +50,25 @@ Observed 2026-04-22 on two otherwise-identical RTX 5090 machines:
 | BigDaddy | `5.15.167.4-microsoft-standard-WSL2` | **works**: 19.68s verified |
 | GreenDragon | `6.6.87.2-microsoft-standard-WSL2` | **fails**: `cudaMemcpy H2D error 2` on first pinned→device chunk |
 
+### Bisect (2026-04-22 late)
+
+Cairo prove at `log_n=22` and `log_n=23` both complete cleanly on BigDaddy
+(13.25s and 29.65s respectively, proofs verify). At `log_n=24` WSL2 dies with
+`Wsl/Service/E_UNEXPECTED` — the VM is killed, requiring `wsl --shutdown` to
+recover. This happens deterministically, on a freshly-restarted WSL instance,
+even immediately after a successful `log_n=23` run in the same session.
+
+So:
+- **log_n ≤ 23: works** inside WSL2 on BigDaddy.
+- **log_n ≥ 24: crashes WSL2 VM** (not just the prover process).
+
+This is a WSL-level GPU-PV / kernel issue, not fixable from user space.
+Workarounds if you need `log_n ≥ 24` measurements:
+- Boot native Linux and run the prover outside WSL.
+- Downgrade the WSL kernel (potentially back to 5.15.x).
+- Allocate more to `.wslconfig` (tried memory=56G + swap=32G — no effect at
+  log_n=24; memory pressure isn't the trigger, GPU-PV call is).
+
 The newer WSL kernel (6.6) has a GPU-PV staging-area limit that is hit by
 the 8 GB pinned transfer used at log_n=30 — even when 30 GB of VRAM is free.
 Chunking the transfer into 512 MB pieces (shipped in `src/device/buffer.rs`)

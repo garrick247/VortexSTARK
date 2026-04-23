@@ -1,0 +1,32 @@
+name: Security Audit
+
+on:
+  schedule:
+    # Weekly — every Monday 06:00 UTC
+    - cron: "0 6 * * 1"
+  push:
+    branches: [main]
+    paths:
+      - "Cargo.toml"
+      - "Cargo.lock"
+      - ".github/workflows/security-audit.yml"
+  workflow_dispatch:
+
+jobs:
+  audit:
+    name: cargo audit
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install rustup nightly toolchain
+        run: |
+          rustup toolchain install nightly --profile minimal
+          rustup default nightly
+      - name: Install cargo-audit
+        run: cargo install cargo-audit --locked
+      - name: Run cargo audit
+        run: cargo audit
+        # Known-vulnerable deps in the full tree (webpki-roots vendored etc.)
+        # may produce warnings; keep the workflow non-blocking on warnings for
+        # now by not passing --deny warnings. Critical vulnerabilities will
+        # still fail via cargo-audit's default exit code behavior.
