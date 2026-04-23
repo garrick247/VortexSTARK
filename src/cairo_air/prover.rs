@@ -985,9 +985,12 @@ fn cairo_prove_cached_with_columns(
     let mut trace_poly_coeffs: Vec<Vec<u32>> = Vec::with_capacity(N_COLS);
 
     // Stwo NTT LDE: trace column → stwo-basis coefficients → eval-domain BRT-canonic evaluations.
+    // Permute hc→canonic on GPU (cuda_permute_hc_to_canonic_brt) to avoid a CPU-side gather.
     let ntt_col_save = |src: &Vec<u32>| -> (DeviceBuffer<u32>, Vec<u32>) {
-        let canonic = Coset::permute_hc_natural_to_canonic_brt(src, log_n);
-        let mut d_col = DeviceBuffer::from_host(&canonic);
+        let d_src = DeviceBuffer::from_host(src);
+        let mut d_col = DeviceBuffer::<u32>::alloc(n);
+        unsafe { ffi::cuda_permute_hc_to_canonic_brt(d_src.as_ptr(), d_col.as_mut_ptr(), n as u32, log_n); }
+        drop(d_src);
         ntt::interpolate_stwo(&mut d_col, &cache.stwo_trace_ntt);
         let stwo_coeffs = d_col.to_host();
         let mut d_eval = DeviceBuffer::<u32>::alloc(eval_size);
@@ -998,10 +1001,11 @@ fn cairo_prove_cached_with_columns(
     };
 
     // Stwo NTT LDE for interaction trace (natural trace-domain → BRT-canonic eval-domain).
+    // Permute hc→canonic on GPU in-place-ish — avoids the D→H→CPU-permute→H→D round-trip.
     let stwo_ntt_lde = |d_trace: DeviceBuffer<u32>| -> DeviceBuffer<u32> {
-        let natural = d_trace.to_host();
-        let canonic = Coset::permute_hc_natural_to_canonic_brt(&natural, log_n);
-        let mut d = DeviceBuffer::from_host(&canonic);
+        let mut d = DeviceBuffer::<u32>::alloc(n);
+        unsafe { ffi::cuda_permute_hc_to_canonic_brt(d_trace.as_ptr(), d.as_mut_ptr(), n as u32, log_n); }
+        drop(d_trace);
         ntt::interpolate_stwo(&mut d, &cache.stwo_trace_ntt);
         let mut d_eval = DeviceBuffer::<u32>::alloc(eval_size);
         unsafe { ffi::cuda_zero_pad(d.as_ptr(), d_eval.as_mut_ptr(), n as u32, eval_size as u32); }
