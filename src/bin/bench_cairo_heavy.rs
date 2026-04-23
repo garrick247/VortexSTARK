@@ -88,14 +88,44 @@ fn main() {
     println!("║  Cairo STARK: prove + verify, full constraint checking     ║");
     println!("╚══════════════════════════════════════════════════════════════╝\n");
 
+    // Usage: bench_cairo_heavy [WORKLOADS] [--max-log-n N]
+    //   WORKLOADS: space-separated indices 1..=4 (default: "1 2 3 4")
+    //   --max-log-n N: cap the largest log_n run (default: 26). Useful under
+    //   WSL2 kernel 6.6 or when VRAM is shared with other processes — caps
+    //   at 24 or 22 keep peak memory well below 32 GB.
+    //
+    // Examples:
+    //   bench_cairo_heavy                 # all workloads up to log_n=26
+    //   bench_cairo_heavy 1 --max-log-n 22
+    //   bench_cairo_heavy 4               # just the DeFi + Pedersen stress test
+    let args: Vec<String> = std::env::args().skip(1).collect();
+    let mut max_log_n: u32 = 26;
+    let mut workloads: Vec<u32> = Vec::new();
+    let mut iter = args.iter();
+    while let Some(a) = iter.next() {
+        if a == "--max-log-n" {
+            if let Some(v) = iter.next() {
+                max_log_n = v.parse().expect("--max-log-n expects u32");
+            }
+        } else if let Ok(n) = a.parse::<u32>() {
+            if (1..=4).contains(&n) { workloads.push(n); }
+        }
+    }
+    if workloads.is_empty() { workloads = vec![1, 2, 3, 4]; }
+    println!("Running workloads {:?} with max log_n={}\n", workloads, max_log_n);
+    let size_filter = |sizes: &[u32]| -> Vec<u32> {
+        sizes.iter().copied().filter(|&s| s <= max_log_n).collect()
+    };
+
     ffi::init_memory_pool_greedy();
     gpu_init();
 
     // ================================================================
     // WORKLOAD 1: Pure Fibonacci (baseline, add-only)
     // ================================================================
+    if workloads.contains(&1) {
     println!("━━━ WORKLOAD 1: Fibonacci (add-only baseline) ━━━");
-    for log_n in [20u32, 24, 26] {
+    for log_n in size_filter(&[20u32, 24, 26]) {
         let n = 1usize << log_n;
         let program = build_fib_program(n);
 
@@ -114,12 +144,14 @@ fn main() {
         println!("  log_n={log_n:>2}  {n:>12} steps  prove={prove_ms:>8.1}ms  verify={verify_ms:>5.1}ms  {status}");
     }
     println!();
+    }
 
     // ================================================================
     // WORKLOAD 2: DeFi pricing engine (add+mul+immediate mix)
     // ================================================================
+    if workloads.contains(&2) {
     println!("━━━ WORKLOAD 2: DeFi pricing engine (add+mul+imm mix) ━━━");
-    for log_n in [20u32, 24, 26] {
+    for log_n in size_filter(&[20u32, 24, 26]) {
         let n = 1usize << log_n;
         let program = build_defi_program(n);
 
@@ -137,13 +169,17 @@ fn main() {
         println!("  log_n={log_n:>2}  {n:>12} steps  prove={prove_ms:>8.1}ms  verify={verify_ms:>5.1}ms  {status}");
     }
     println!();
+    }
 
     // ================================================================
     // WORKLOAD 3: Fibonacci + GPU Pedersen (rollup Merkle tree style)
     // ================================================================
+    if workloads.contains(&3) {
     println!("━━━ WORKLOAD 3: Fibonacci + GPU Pedersen (rollup-style) ━━━");
     // EC trace now GPU-generated — can handle much larger counts.
-    for (log_n, n_ped) in [(20u32, 1024usize), (24, 16384), (26, 16384)] {
+    let pairs: Vec<(u32, usize)> = [(20u32, 1024usize), (24, 16384), (26, 16384)]
+        .into_iter().filter(|(ln, _)| *ln <= max_log_n).collect();
+    for (log_n, n_ped) in pairs {
         let n = 1usize << log_n;
         let program = build_fib_program(n);
 
@@ -170,10 +206,12 @@ fn main() {
         println!("         prove={prove_ms:>8.1}ms  verify={verify_ms:>5.1}ms  {status}");
     }
     println!();
+    }
 
     // ================================================================
     // WORKLOAD 4: Maximum scale — push the limits
     // ================================================================
+    if workloads.contains(&4) && max_log_n >= 26 {
     println!("━━━ WORKLOAD 4: Maximum scale ━━━");
     {
         let log_n = 26u32;
@@ -214,6 +252,9 @@ fn main() {
             proof.query_indices.len());
     }
     println!();
+    } else if workloads.contains(&4) {
+        println!("━━━ WORKLOAD 4: skipped (requires --max-log-n >= 26) ━━━\n");
+    }
 
     // ================================================================
     // SUMMARY
