@@ -337,6 +337,27 @@ pub struct CairoProof {
     /// Committed before z_dict is drawn — binds dict operations into the FRI polynomial
     /// and closes GAP-1: a malicious prover cannot change dict_key/dict_new after commitment.
     pub dict_trace_commitment: [u32; 8],
+
+    /// Phase 2 (FELT252_DESIGN.md Option B) side table. Each row encodes
+    /// `(pointer, key_limbs[9], prev_limbs[9], new_limbs[9])` = 28 M31 values.
+    /// Populated from `HintContext::dict_accesses` at prove time (widening
+    /// u64 values into `Felt252` via `Felt252::from_u64` for now; once the
+    /// hint layer carries true Felt252 values, the widen becomes identity).
+    ///
+    /// When non-empty, `dict_side_table_commitment` is mixed into the
+    /// Fiat-Shamir channel immediately after `dict_trace_commitment` and
+    /// before `z_dict_link` is drawn. The verifier recomputes the hash
+    /// from this field and checks.
+    ///
+    /// Empty for proofs of programs with no dict accesses — in which case
+    /// the mix is skipped entirely, preserving Fiat-Shamir ordering with
+    /// pre-Phase-2 proofs.
+    #[serde(default)]
+    pub dict_side_table: Vec<[u32; 28]>,
+    /// Blake2s commitment to the flat u32 serialization of `dict_side_table`.
+    /// Zero when the side table is empty; the verifier then skips the mix.
+    #[serde(default)]
+    pub dict_side_table_commitment: [u32; 8],
     /// Merkle root: LogUp interaction trace (4 QM31 columns)
     pub interaction_commitment: [u32; 8],
     /// Merkle root: range check interaction trace (4 QM31 columns)
@@ -1129,6 +1150,35 @@ fn cairo_prove_cached_with_columns(
     // any dict challenges are derived. A malicious prover cannot change these columns
     // after this point without invalidating z_dict and breaking all subsequent checks.
     channel.mix_digest(&dict_trace_commitment);
+
+    // Phase 2 dict side-table commitment. Builds a 28-u32-per-row table
+    // (pointer + 9 key limbs + 9 prev limbs + 9 new limbs) from the existing
+    // `dict_accesses` log, hashes it, and mixes into the channel before
+    // z_dict_link is drawn. When the side table is empty (no dict accesses
+    // in this program), skip the mix to preserve Fiat-Shamir compat with
+    // pre-Phase-2 proofs.
+    let (dict_side_table, dict_side_table_commitment) = {
+        use crate::felt252::{Felt252, FeltExt};
+        if dict_accesses.is_empty() {
+            (Vec::<[u32; 28]>::new(), [0u32; 8])
+        } else {
+            let rows: Vec<[u32; 28]> = dict_accesses.iter().enumerate().map(|(i, &(_step, k, p, nv))| {
+                let key_limbs = Felt252::from_u64(k).to_m31_limbs_9();
+                let prev_limbs = Felt252::from_u64(p).to_m31_limbs_9();
+                let new_limbs = Felt252::from_u64(nv).to_m31_limbs_9();
+                let mut row = [0u32; 28];
+                row[0] = i as u32; // pointer (trace-column index)
+                row[1..10].copy_from_slice(&key_limbs);
+                row[10..19].copy_from_slice(&prev_limbs);
+                row[19..28].copy_from_slice(&new_limbs);
+                row
+            }).collect();
+            let flat: Vec<u32> = rows.iter().flat_map(|r| r.iter().copied()).collect();
+            let commitment = crate::channel::hash_words(&flat);
+            channel.mix_digest(&commitment);
+            (rows, commitment)
+        }
+    };
 
     phase_tag("ntt_blind_commit");
 
@@ -2782,6 +2832,8 @@ fn cairo_prove_cached_with_columns(
         trace_commitment,
         trace_commitment_hi,
         dict_trace_commitment,
+        dict_side_table,
+        dict_side_table_commitment,
         ec_trace_commitment,
         ec_trace_commitment_hi,
         ec_log_eval: ec_log_eval_opt,
@@ -2874,6 +2926,25 @@ pub fn cairo_verify(proof: &CairoProof) -> Result<(), String> {
     // dict_trace_commitment binds cols 31-33 (dict_key, dict_new, dict_active) before
     // any dict challenges are drawn.  Must be mixed here to keep channel in sync.
     channel.mix_digest(&proof.dict_trace_commitment);
+
+    // Phase 2 dict side-table commitment check. When the side table is
+    // non-empty, re-hash it and (1) verify the stored commitment matches
+    // and (2) mix into the channel — preserving the Fiat-Shamir ordering
+    // the prover used. Empty side table ⇒ no mix, matching pre-Phase-2
+    // prover behavior.
+    if !proof.dict_side_table.is_empty() {
+        let flat: Vec<u32> = proof.dict_side_table.iter()
+            .flat_map(|r| r.iter().copied())
+            .collect();
+        let recomputed = crate::channel::hash_words(&flat);
+        if recomputed != proof.dict_side_table_commitment {
+            return Err(format!(
+                "dict_side_table_commitment mismatch: proof={:?}, recomputed={:?}",
+                proof.dict_side_table_commitment, recomputed,
+            ));
+        }
+        channel.mix_digest(&proof.dict_side_table_commitment);
+    }
 
     // ── S_dict link verification (GAP-1 closure) ─────────────────────────────
     // Draw z_dict_link, alpha_dict_link after dict_trace_commitment (same as prover).
