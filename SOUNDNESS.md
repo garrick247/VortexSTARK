@@ -271,9 +271,52 @@ verifies `exec_final == sorted_final`.
 
 **Files:** `src/cairo_air/trace.rs` (N_VM_COLS=31, N_COLS=34, N_CONSTRAINTS=35), `src/cairo_air/prover.rs`, `cuda/cairo_constraint.cu` (C33, C34), `src/cairo_air/dict_air.rs`.
 
-### (PARTIALLY MITIGATED) Felt252 truncation
-`cairo_prove_program` now returns `Err(ProveError::Felt252Overflow)` if any bytecode value
-exceeds u64 range. Values in (M31, u64] are still silently reduced mod M31.
+### (PARTIALLY MITIGATED — Phase 2 in progress) Felt252 truncation
+
+`cairo_prove_program` returns `Err(ProveError::Felt252Overflow)` if any
+bytecode value exceeds u64 range. Values in (M31, u64] are still silently
+reduced mod M31 inside trace columns, because those columns are M31-valued.
+
+**Phase 2 progress (2026-04-23):** The full 252-bit story is being unblocked
+incrementally per `FELT252_DESIGN.md`:
+
+- `src/felt252.rs` — typed `Felt252` + helpers (to/from hex, to_m31_limbs_9,
+  to/from le_bytes, low_u64, try_to_u64). Hash derived on the underlying
+  `Fp` so `HashMap<Felt252, _>` works.
+- `CasmProgram::bytecode_felt: Vec<Felt252>` — parallel to the (truncated)
+  `bytecode: Vec<u64>`, preserves all 252 bits of every bytecode constant.
+  Populated by every loader (CASM JSON, Cairo 0 JSON, Starknet RPC).
+- `CairoProof::dict_side_table: Vec<[u32; 28]>` + `dict_side_table_commitment`
+  — Option B side table from the design doc. Each row is
+  `[pointer, 9 key limbs, 9 prev limbs, 9 new limbs]`. Blake2s-committed to
+  the Fiat-Shamir channel right after `dict_trace_commitment` and before
+  `z_dict_link` is drawn. Verifier recomputes + mixes. Empty side table ⇒
+  no mix ⇒ pre-Phase-2 proofs still verify.
+- `SyscallState::storage: HashMap<Felt252, Felt252>` — full-felt contract
+  storage; STORAGE_READ/WRITE widen u64→Felt252 on the way in and narrow
+  via `low_u64` on the way out. Values preserved for proof-side consumers.
+- `SyscallState::caller_address` / `contract_address` / `entry_point_selector`
+  — widened to `Felt252`; narrowed at the memory-write boundary.
+- `RpcResolver::try_resolve_felt(Felt252)` — accepts full 252-bit
+  class_hashes, canonical hex normalization; shares a single cache with
+  the u64 entry point.
+
+**What still truncates** (Phase 2 remainder):
+- VM memory cells are still u64. Any value written or read through memory
+  during execution passes through a u64 boundary.
+- `HintContext::dict_accesses` still carries `(usize, u64, u64, u64)`
+  quadruples; the side-table commitment above widens at the boundary,
+  preserving the *committed* values but not the *memory* representation.
+- `CrossContractCall`, `DeployedContract`, `L1Message`, `SyscallEvent`
+  record types still carry `u64` fields.
+
+**Soundness implication until VM memory widens:** A program whose runtime
+memory values exceed M31 still triggers `ProveError::ExecutionRangeViolation`
+and is refused proving. The Phase 2 groundwork above is not yet consumed by
+the trace constraints; the side-table commitment binds the prover to a
+specific `dict_side_table` value but does not (yet) enforce per-row
+correctness via a LogUp bus to the main-trace pointer columns. That LogUp
+bus is the next remaining Phase 2 piece.
 
 ### (CLOSED 2026-03-26) Full ZK — GAP-4
 
