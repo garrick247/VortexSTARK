@@ -1154,12 +1154,12 @@ fn cairo_prove_cached_with_columns(
 
     let (dict_main_interaction_commitment, tile_roots_sdict, host_sdict, host_sdict_hc) = {
         // Stwo output is BRT-canonic. Inverse permute for constraint kernel.
+        // Commit directly from the GPU-resident d_sdict* buffers — saves a
+        // 4-col eval-domain H->D round-trip.
         let cn = [d_sdict0.to_host(), d_sdict1.to_host(), d_sdict2.to_host(), d_sdict3.to_host()];
-        drop(d_sdict0); drop(d_sdict1); drop(d_sdict2); drop(d_sdict3);
         let hc: [Vec<u32>; 4] = std::array::from_fn(|i| Coset::permute_canonic_brt_to_hc_natural(&cn[i], log_eval_size));
-        let g0 = DeviceBuffer::from_host(&cn[0]); let g1 = DeviceBuffer::from_host(&cn[1]);
-        let g2 = DeviceBuffer::from_host(&cn[2]); let g3 = DeviceBuffer::from_host(&cn[3]);
-        let (root, tiles) = MerkleTree::commit_root_soa4_with_subtrees(&g0, &g1, &g2, &g3, log_eval_size);
+        let (root, tiles) = MerkleTree::commit_root_soa4_with_subtrees(&d_sdict0, &d_sdict1, &d_sdict2, &d_sdict3, log_eval_size);
+        drop(d_sdict0); drop(d_sdict1); drop(d_sdict2); drop(d_sdict3);
         (root, tiles, cn, hc)
     };
     channel.mix_digest(&dict_main_interaction_commitment);
@@ -1586,23 +1586,21 @@ fn cairo_prove_cached_with_columns(
     let rc_d2 = stwo_ntt_lde(rc2); let rc_d3 = stwo_ntt_lde(rc3);
 
     let (interaction_commitment, tile_roots_logup, host_logup, host_logup_hc) = {
+        // Copy to host for later decommit work, then commit directly from the
+        // GPU-resident buffers — saves a 4-col eval-domain H->D round-trip.
         let cn = [d_logup0.to_host(), d_logup1.to_host(), d_logup2.to_host(), d_logup3.to_host()];
-        drop(d_logup0); drop(d_logup1); drop(d_logup2); drop(d_logup3);
         let hc: [Vec<u32>; 4] = std::array::from_fn(|i| Coset::permute_canonic_brt_to_hc_natural(&cn[i], log_eval_size));
-        let g0 = DeviceBuffer::from_host(&cn[0]); let g1 = DeviceBuffer::from_host(&cn[1]);
-        let g2 = DeviceBuffer::from_host(&cn[2]); let g3 = DeviceBuffer::from_host(&cn[3]);
-        let (root, tiles) = MerkleTree::commit_root_soa4_with_subtrees(&g0, &g1, &g2, &g3, log_eval_size);
+        let (root, tiles) = MerkleTree::commit_root_soa4_with_subtrees(&d_logup0, &d_logup1, &d_logup2, &d_logup3, log_eval_size);
+        drop(d_logup0); drop(d_logup1); drop(d_logup2); drop(d_logup3);
         (root, tiles, cn, hc)
     };
     channel.mix_digest(&interaction_commitment);
 
     let (rc_interaction_commitment, tile_roots_rc, host_rc_logup, host_rc_logup_hc) = {
         let cn = [rc_d0.to_host(), rc_d1.to_host(), rc_d2.to_host(), rc_d3.to_host()];
-        drop(rc_d0); drop(rc_d1); drop(rc_d2); drop(rc_d3);
         let hc: [Vec<u32>; 4] = std::array::from_fn(|i| Coset::permute_canonic_brt_to_hc_natural(&cn[i], log_eval_size));
-        let g0 = DeviceBuffer::from_host(&cn[0]); let g1 = DeviceBuffer::from_host(&cn[1]);
-        let g2 = DeviceBuffer::from_host(&cn[2]); let g3 = DeviceBuffer::from_host(&cn[3]);
-        let (root, tiles) = MerkleTree::commit_root_soa4_with_subtrees(&g0, &g1, &g2, &g3, log_eval_size);
+        let (root, tiles) = MerkleTree::commit_root_soa4_with_subtrees(&rc_d0, &rc_d1, &rc_d2, &rc_d3, log_eval_size);
+        drop(rc_d0); drop(rc_d1); drop(rc_d2); drop(rc_d3);
         (root, tiles, cn, hc)
     };
     channel.mix_digest(&rc_interaction_commitment);
@@ -1614,8 +1612,8 @@ fn cairo_prove_cached_with_columns(
     let commit_qm31 = |d: [DeviceBuffer<u32>; 4]| -> ([u32; 8], Vec<[u32; 8]>, [Vec<u32>; 4], [Vec<u32>; 4]) {
         let cn: [Vec<u32>; 4] = std::array::from_fn(|i| d[i].to_host());
         let hc: [Vec<u32>; 4] = std::array::from_fn(|i| Coset::permute_canonic_brt_to_hc_natural(&cn[i], log_eval_size));
-        let g: [DeviceBuffer<u32>; 4] = std::array::from_fn(|i| DeviceBuffer::from_host(&cn[i]));
-        let (root, tiles) = MerkleTree::commit_root_soa4_with_subtrees(&g[0], &g[1], &g[2], &g[3], log_eval_size);
+        // Commit directly from the GPU-resident buffers instead of re-uploading `cn`.
+        let (root, tiles) = MerkleTree::commit_root_soa4_with_subtrees(&d[0], &d[1], &d[2], &d[3], log_eval_size);
         (root, tiles, cn, hc)
     };
     let (logup_t1_commitment, _tr_t1, _cn_t1, host_t1_hc) = commit_qm31(ntt_qm31(&logup_t1_trace));
