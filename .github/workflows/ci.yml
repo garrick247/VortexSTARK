@@ -1,0 +1,70 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  # Compile-check the library using a CUDA-enabled container. nvcc has to
+  # exist for build.rs to succeed; a real GPU is not required for
+  # `cargo check`. The self-hosted GPU runner job below is where real tests
+  # run (gated on an available runner).
+  compile-check:
+    name: cargo check (CUDA toolkit)
+    runs-on: ubuntu-latest
+    container:
+      image: nvidia/cuda:12.4.1-devel-ubuntu22.04
+    steps:
+      - name: Install build deps
+        run: |
+          apt-get update
+          apt-get install -y curl build-essential pkg-config git
+      - uses: actions/checkout@v4
+      - name: Install Rust nightly
+        run: |
+          curl --proto "=https" --tlsv1.2 -sSf https://sh.rustup.rs | \
+              sh -s -- -y --default-toolchain nightly --profile minimal --component clippy,rustfmt
+          . "$HOME/.cargo/env"
+          rustc --version
+      - name: Cache cargo registry + target
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-
+      - name: Remove vendor config (CI uses crates.io + public stwo-fork)
+        # .cargo/config.toml redirects crates.io to vendor/; vendor/ is
+        # .gitignored, so CI must fetch from crates.io + the public
+        # stwo-fork repo directly.
+        run: rm -f .cargo/config.toml
+      - name: cargo check --lib
+        run: |
+          . "$HOME/.cargo/env"
+          export PATH="/usr/local/cuda/bin:$PATH"
+          cargo check --lib
+
+  # Full test suite — gated on a `gpu-ci` label so it only runs when a
+  # self-hosted runner with an RTX 5090 is available. To enable:
+  #   1. Register a self-hosted runner (see reference_github_runner.md pattern)
+  #      with labels: self-hosted, gpu, rtx5090
+  #   2. Uncomment this job
+  # gpu-tests:
+  #   name: cargo test --release
+  #   runs-on: [self-hosted, gpu, rtx5090]
+  #   steps:
+  #     - uses: actions/checkout@v4
+  #     - name: cargo test --release --lib
+  #       run: cargo test --release --lib -- --test-threads=1
+  #     - name: cargo test --release --tests
+  #       run: cargo test --release --tests -- --test-threads=1
