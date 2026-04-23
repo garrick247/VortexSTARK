@@ -291,12 +291,17 @@ incrementally per `FELT252_DESIGN.md`:
   `[pointer, 9 key limbs, 9 prev limbs, 9 new limbs]`. Blake2s-committed to
   the Fiat-Shamir channel right after `dict_trace_commitment` and before
   `z_dict_link` is drawn. Verifier recomputes + mixes. Empty side table ⇒
-  no mix ⇒ pre-Phase-2 proofs still verify.
+  no mix ⇒ pre-Phase-2 proofs still verify. Verifier also enforces
+  canonical-limb encoding (each of the 27 M31 limbs < 2^28) so a prover
+  cannot commit non-canonical Felt252 garbage.
 - `SyscallState::storage: HashMap<Felt252, Felt252>` — full-felt contract
   storage; STORAGE_READ/WRITE widen u64→Felt252 on the way in and narrow
   via `low_u64` on the way out. Values preserved for proof-side consumers.
 - `SyscallState::caller_address` / `contract_address` / `entry_point_selector`
   — widened to `Felt252`; narrowed at the memory-write boundary.
+- `SyscallEvent.keys/data`, `CrossContractCall.target/entry_point_selector/calldata`,
+  `DeployedContract.class_hash/salt/calldata/contract_address`,
+  `L1Message.to_address/payload` — all widened to `Felt252` / `Vec<Felt252>`.
 - `RpcResolver::try_resolve_felt(Felt252)` — accepts full 252-bit
   class_hashes, canonical hex normalization; shares a single cache with
   the u64 entry point.
@@ -307,8 +312,6 @@ incrementally per `FELT252_DESIGN.md`:
 - `HintContext::dict_accesses` still carries `(usize, u64, u64, u64)`
   quadruples; the side-table commitment above widens at the boundary,
   preserving the *committed* values but not the *memory* representation.
-- `CrossContractCall`, `DeployedContract`, `L1Message`, `SyscallEvent`
-  record types still carry `u64` fields.
 
 **Soundness implication until VM memory widens:** A program whose runtime
 memory values exceed M31 still triggers `ProveError::ExecutionRangeViolation`
