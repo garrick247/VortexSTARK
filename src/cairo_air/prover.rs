@@ -5092,8 +5092,10 @@ mod tests {
             name: "TestLessThan".to_string(),
             raw: hint_json,
         };
+        let bytecode_felt = bytecode.iter().map(|&v| crate::felt252::Felt252::from_u64(v)).collect();
         let program = super::super::casm_loader::CasmProgram {
             bytecode,
+            bytecode_felt,
             entry_point: 0,
             name: "test_hints".to_string(),
             builtins: vec![],
@@ -5234,8 +5236,11 @@ mod tests {
             ..Default::default()
         };
         let large_immediate: u64 = (1u64 << 31); // = P, ≥ M31
+        let bc = vec![assert_imm.encode(), large_immediate];
+        let bc_felt = bc.iter().map(|&v| crate::felt252::Felt252::from_u64(v)).collect();
         let program = CasmProgram {
-            bytecode: vec![assert_imm.encode(), large_immediate],
+            bytecode: bc,
+            bytecode_felt: bc_felt,
             entry_point: 0,
             name: "test_overflow".into(),
             builtins: vec![],
@@ -5256,8 +5261,10 @@ mod tests {
         ffi::init_memory_pool();
         use crate::cairo_air::casm_loader::{CasmProgram, CasmFormat};
         let program_bytes = build_fib_program(32);
+        let bc_felt = program_bytes.iter().map(|&v| crate::felt252::Felt252::from_u64(v)).collect();
         let program = CasmProgram {
             bytecode: program_bytes,
+            bytecode_felt: bc_felt,
             entry_point: 0,
             name: "fib".into(),
             builtins: vec![],

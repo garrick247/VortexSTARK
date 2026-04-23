@@ -14,7 +14,21 @@ use std::path::Path;
 #[derive(Clone, Debug)]
 pub struct CasmProgram {
     /// VM bytecode as u64 values (instructions + immediates).
+    /// When a felt252 exceeds u64, the low 64 bits are stored here and the
+    /// full value is kept at the same index in [`bytecode_felt`]. Cairo
+    /// instructions are always ≤63 bits, so truncation only affects large
+    /// immediate constants (addresses, hashes).
     pub bytecode: Vec<u64>,
+    /// Full 252-bit value at each bytecode position, parallel to
+    /// [`bytecode`]. For positions that fit in u64, this matches the u64
+    /// value exactly; for wider felts, this preserves the high bits that
+    /// [`bytecode`] loses. Populated by CASM-JSON and Cairo-0-JSON loaders
+    /// via [`parse_hex_felt252`].
+    ///
+    /// Consumers downstream of the prover (hint handlers that need true
+    /// felt values, the eventual Phase 2 VM widening) read from here
+    /// rather than trusting [`bytecode`] when the value is wide.
+    pub bytecode_felt: Vec<crate::felt252::Felt252>,
     /// Entry point offset (PC to start execution at).
     pub entry_point: u64,
     /// Program name (from filename or metadata).
@@ -26,6 +40,9 @@ pub struct CasmProgram {
     /// Hints indexed by PC offset.
     pub hints: Vec<(usize, Vec<CasmHint>)>,
     /// Number of felt252 values that overflowed u64 during parsing.
+    /// The full values are still preserved in [`bytecode_felt`]; this
+    /// count is informational + used by the prover's current
+    /// `ProveError::Felt252Overflow` guard until the VM widens.
     pub overflow_count: usize,
 }
 
@@ -125,6 +142,7 @@ fn parse_casm_json(json: &str, name: &str) -> Result<CasmProgram, String> {
     }
 
     let mut bytecode = Vec::with_capacity(file.bytecode.len());
+    let mut bytecode_felt = Vec::with_capacity(file.bytecode.len());
     let mut overflow_count = 0;
 
     for (i, val) in file.bytecode.iter().enumerate() {
@@ -134,6 +152,13 @@ fn parse_casm_json(json: &str, name: &str) -> Result<CasmProgram, String> {
             overflow_count += 1;
         }
         bytecode.push(v.0);
+        // Preserve the full 252-bit value alongside the truncated u64.
+        // For values that fit in u64, this is just Felt252::from_u64(v.0).
+        // For wider values, we reparse from the original string to keep
+        // all 252 bits. `val` is either a string or number per Cairo 1
+        // CASM JSON convention; route through parse_felt_value_felt252.
+        bytecode_felt.push(parse_felt_value_felt252(val)
+            .map_err(|e| format!("bytecode_felt[{i}]: {e}"))?);
     }
 
     // Determine entry point and builtins
@@ -163,6 +188,7 @@ fn parse_casm_json(json: &str, name: &str) -> Result<CasmProgram, String> {
 
     Ok(CasmProgram {
         bytecode,
+        bytecode_felt,
         entry_point,
         name: name.to_string(),
         builtins,
@@ -182,6 +208,7 @@ fn parse_cairo0_json(json: &str, name: &str) -> Result<CasmProgram, String> {
     }
 
     let mut bytecode = Vec::with_capacity(file.data.len());
+    let mut bytecode_felt = Vec::with_capacity(file.data.len());
     let mut overflow_count = 0;
 
     for (i, hex_str) in file.data.iter().enumerate() {
@@ -191,6 +218,8 @@ fn parse_cairo0_json(json: &str, name: &str) -> Result<CasmProgram, String> {
             overflow_count += 1;
         }
         bytecode.push(v.0);
+        bytecode_felt.push(parse_hex_felt252(hex_str)
+            .map_err(|e| format!("bytecode_felt[{i}]: {e}"))?);
     }
 
     let entry_point = file.main.unwrap_or(0) as u64;
@@ -204,6 +233,7 @@ fn parse_cairo0_json(json: &str, name: &str) -> Result<CasmProgram, String> {
 
     Ok(CasmProgram {
         bytecode,
+        bytecode_felt,
         entry_point,
         name: name.to_string(),
         builtins: file.builtins,
@@ -233,6 +263,10 @@ fn parse_felt_value(val: &serde_json::Value) -> Result<(u64, bool), String> {
 
 /// Parse a hex string (with or without 0x prefix) as a felt252.
 /// Returns (u64_value, overflowed) — truncates to u64 if the value exceeds 64 bits.
+///
+/// Prefer [`parse_hex_felt252`] when you need the full 252-bit value; this
+/// function is kept for bytecode parsing where only the low 64 bits feed
+/// the VM's u64 memory cells.
 pub fn parse_hex_felt(s: &str) -> Result<(u64, bool), String> {
     let s = s.trim().trim_start_matches("0x").trim_start_matches("0X");
     if s.is_empty() {
@@ -253,6 +287,34 @@ pub fn parse_hex_felt(s: &str) -> Result<(u64, bool), String> {
     let v = u64::from_str_radix(low_hex, 16)
         .map_err(|e| format!("invalid hex '{s}': {e}"))?;
     Ok((v, true))
+}
+
+/// Parse a hex string as the full 252-bit `Felt252`, no truncation.
+/// Used to populate `CasmProgram::bytecode_felt` alongside the (truncated)
+/// `bytecode: Vec<u64>`. Accepts the same `"0x..."` or bare-hex formats as
+/// [`parse_hex_felt`], and canonically reduces mod the Stark prime.
+pub fn parse_hex_felt252(s: &str) -> Result<crate::felt252::Felt252, String> {
+    // Felt252::from_hex accepts both "0x..." and padded bare-hex, and reduces.
+    // It returns Felt252 directly so there is no lossy boundary.
+    Ok(crate::felt252::Felt252::from_hex(s))
+}
+
+/// Parse a JSON felt value (string or number) as the full 252-bit `Felt252`,
+/// no truncation. Mirrors [`parse_felt_value`] but returns a lossless
+/// `Felt252` instead of the truncated `(u64, bool)` pair.
+pub fn parse_felt_value_felt252(val: &serde_json::Value) -> Result<crate::felt252::Felt252, String> {
+    match val {
+        serde_json::Value::String(s) => parse_hex_felt252(s),
+        serde_json::Value::Number(n) => {
+            // Route small numbers through u64, wider through string form.
+            if let Some(u) = n.as_u64() {
+                Ok(crate::felt252::Felt252::from_u64(u))
+            } else {
+                parse_hex_felt252(&n.to_string())
+            }
+        }
+        _ => Err(format!("expected string or number, got: {val}")),
+    }
 }
 
 /// Parse CASM hints from the JSON hints field.
@@ -574,8 +636,10 @@ mod tests {
         let ret = Instruction::ret();
 
         let bytecode = vec![assert_imm.encode(), 42, ret.encode()];
+        let bytecode_felt = bytecode.iter().map(|&v| crate::felt252::Felt252::from_u64(v)).collect();
         let program = CasmProgram {
             bytecode,
+            bytecode_felt,
             entry_point: 0,
             name: "test".to_string(),
             builtins: vec![],

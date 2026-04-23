@@ -249,6 +249,7 @@ fn parse_casm_rpc_result(result: &serde_json::Value, class_hash: &str) -> Result
         .ok_or("no bytecode in CASM response")?;
 
     let mut bytecode = Vec::with_capacity(bytecode_arr.len());
+    let mut bytecode_felt = Vec::with_capacity(bytecode_arr.len());
     let mut overflow_count = 0;
 
     for (i, val) in bytecode_arr.iter().enumerate() {
@@ -257,6 +258,8 @@ fn parse_casm_rpc_result(result: &serde_json::Value, class_hash: &str) -> Result
             .map_err(|e| format!("bytecode[{i}]: {e}"))?;
         if overflow { overflow_count += 1; }
         bytecode.push(v);
+        bytecode_felt.push(super::casm_loader::parse_hex_felt252(hex)
+            .map_err(|e| format!("bytecode_felt[{i}]: {e}"))?);
     }
 
     // Extract entry points
@@ -271,6 +274,7 @@ fn parse_casm_rpc_result(result: &serde_json::Value, class_hash: &str) -> Result
 
     Ok(CasmProgram {
         bytecode,
+        bytecode_felt,
         entry_point,
         name: format!("starknet_{}", &class_hash[..10.min(class_hash.len())]),
         builtins,
@@ -290,6 +294,7 @@ fn parse_cairo0_rpc_result(
         .ok_or("program.data not an array")?;
 
     let mut bytecode = Vec::with_capacity(data_arr.len());
+    let mut bytecode_felt = Vec::with_capacity(data_arr.len());
     let mut overflow_count = 0;
 
     for (i, val) in data_arr.iter().enumerate() {
@@ -298,6 +303,8 @@ fn parse_cairo0_rpc_result(
             .map_err(|e| format!("data[{i}]: {e}"))?;
         if overflow { overflow_count += 1; }
         bytecode.push(v);
+        bytecode_felt.push(super::casm_loader::parse_hex_felt252(hex)
+            .map_err(|e| format!("bytecode_felt[{i}]: {e}"))?);
     }
 
     let builtins = program.get("builtins")
@@ -311,6 +318,7 @@ fn parse_cairo0_rpc_result(
 
     Ok(CasmProgram {
         bytecode,
+        bytecode_felt,
         entry_point: 0,
         name: format!("cairo0_{}", &class_hash[..10.min(class_hash.len())]),
         builtins,
