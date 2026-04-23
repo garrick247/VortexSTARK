@@ -172,19 +172,20 @@ pub fn extract_memory_table(
 
     // Collect raw pairs then sort+dedup — cache-friendly and O(n log n),
     // much faster than BTreeMap for large n (avoids tree pointer chasing).
-    let mut data_pairs: Vec<(u32, u32)> = Vec::with_capacity(n_steps * 3);
-    let mut instr_triples: Vec<(u32, u32, u32)> = Vec::with_capacity(n_steps);
-
-    for i in 0..n_steps {
-        instr_triples.push((
-            trace_cols[COL_PC][i],
-            trace_cols[COL_INST_LO][i],
-            trace_cols[COL_INST_HI][i],
-        ));
-        data_pairs.push((trace_cols[COL_DST_ADDR][i], trace_cols[COL_DST][i]));
-        data_pairs.push((trace_cols[COL_OP0_ADDR][i], trace_cols[COL_OP0][i]));
-        data_pairs.push((trace_cols[COL_OP1_ADDR][i], trace_cols[COL_OP1][i]));
-    }
+    // Gather in parallel — each i is independent; rayon collects into a single
+    // Vec via flat_map_iter.
+    let instr_triples_v: Vec<(u32, u32, u32)> = (0..n_steps).into_par_iter().map(|i| {
+        (trace_cols[COL_PC][i], trace_cols[COL_INST_LO][i], trace_cols[COL_INST_HI][i])
+    }).collect();
+    let data_pairs_v: Vec<(u32, u32)> = (0..n_steps).into_par_iter().flat_map_iter(|i| {
+        [
+            (trace_cols[COL_DST_ADDR][i], trace_cols[COL_DST][i]),
+            (trace_cols[COL_OP0_ADDR][i], trace_cols[COL_OP0][i]),
+            (trace_cols[COL_OP1_ADDR][i], trace_cols[COL_OP1][i]),
+        ].into_iter()
+    }).collect();
+    let mut data_pairs = data_pairs_v;
+    let mut instr_triples = instr_triples_v;
 
     data_pairs.par_sort_unstable();
     let data: Vec<(M31, M31, u32)> = {
