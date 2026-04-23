@@ -1742,13 +1742,14 @@ fn cairo_prove_cached_with_columns(
     let eval_domain = crate::circle::Coset::half_coset(log_eval_size);
     let trace_domain_for_vh = crate::circle::Coset::half_coset(log_n);
     let d_vh_inv = {
-        let mut vh_inv_vals = vec![0u32; eval_size];
-        let mut pt = eval_domain.initial;
-        for i in 0..eval_size {
+        use rayon::prelude::*;
+        // Parallel over eval_size points — each computes its own point via
+        // eval_domain.at(i) rather than sequential `pt = pt.mul(step)`.
+        let vh_inv_vals: Vec<u32> = (0..eval_size).into_par_iter().map(|i| {
+            let pt = eval_domain.at(i);
             let vh = crate::circle::Coset::coset_vanishing_at(&trace_domain_for_vh, pt);
-            vh_inv_vals[i] = vh.inverse().0;
-            pt = pt.mul(eval_domain.step);
-        }
+            vh.inverse().0
+        }).collect();
         DeviceBuffer::from_host(&vh_inv_vals)
     };
 
@@ -1771,13 +1772,13 @@ fn cairo_prove_cached_with_columns(
     //     producing non-zero CFFT at positions n (T_{32}(x)) and n+2 (T_{32}(x)·x),
     //     which is exactly the {64, 66} pattern observed in the failing diagnostic.
     let d_trans_factor = {
+        use rayon::prelude::*;
         let y_trace_last = trace_domain_for_vh.at(n - 1).y;
-        let mut tf = vec![0u32; eval_size];
-        let mut pt = eval_domain.initial;
-        for i in 0..eval_size {
-            tf[i] = (pt.y - y_trace_last).0;
-            pt = pt.mul(eval_domain.step);
-        }
+        // Parallel over eval_size — each thread computes pt via eval_domain.at(i).
+        let tf: Vec<u32> = (0..eval_size).into_par_iter().map(|i| {
+            let pt = eval_domain.at(i);
+            (pt.y - y_trace_last).0
+        }).collect();
         DeviceBuffer::from_host(&tf)
     };
 
