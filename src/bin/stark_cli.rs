@@ -456,6 +456,19 @@ fn cmd_prove_starknet(
             .collect();
         eprintln!("  storage writes: {}", writes.len());
     }
+    if sc_out.total_gas_used > 0 {
+        eprintln!("  gas consumed:   {} (syscalls only — VM-step gas not tracked)",
+            sc_out.total_gas_used);
+    }
+    if !sc_out.cross_contract_calls.is_empty() {
+        eprintln!("  cross-contract calls: {}", sc_out.cross_contract_calls.len());
+    }
+    if !sc_out.deployed_contracts.is_empty() {
+        eprintln!("  deployed contracts:   {}", sc_out.deployed_contracts.len());
+    }
+    if !sc_out.l1_messages.is_empty() {
+        eprintln!("  L1 messages sent:     {}", sc_out.l1_messages.len());
+    }
 
     let bytes = serialize_cairo_proof(&proof);
     let proof_size = bytes.len();
