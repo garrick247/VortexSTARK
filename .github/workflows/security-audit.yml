@@ -30,4 +30,12 @@ jobs:
         #   rand::rng()". Upstream bug not fixed in a released version as of
         #   2026-04-23. We don't install a custom logger, so the unsound path
         #   is not reachable in VortexSTARK. Revisit when rand ships a fix.
-        run: cargo audit --ignore RUSTSEC-2026-0097
+        #   RUSTSEC-2024-0388 — derivative unmaintained. Transitive only;
+        #   revisit when a dependency removes it.
+        #   RUSTSEC-2024-0436 — paste unmaintained. Transitive only;
+        #   revisit when a dependency removes it.
+        run: |
+          cargo audit \
+              --ignore RUSTSEC-2026-0097 \
+              --ignore RUSTSEC-2024-0388 \
+              --ignore RUSTSEC-2024-0436
