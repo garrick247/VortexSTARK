@@ -557,29 +557,49 @@ from Rust native bitwise ops. Padded to the next power of 2.
 - C0: `xor + 2*and - x - y = 0`  (bitwise identity: each bit: `xor_b + 2*and_b = x_b + y_b`)
 - C1: `or - and - xor = 0`         (bitwise identity: `or_b = and_b + xor_b`)
 
-**Soundness limitation:** These constraints hold as *integer* equalities. Over M31 (arithmetic
-mod 2^31-1), the constraint `xor + 2*and = x + y` can be fraudulently satisfied for inputs
-x, y ≥ 2^15 because `x + y` may wrap around mod P. Full soundness requires bit-decomposition
-(e.g. splitting into two 16-bit range-checked chunks), which is NOT implemented here.
+**Soundness limitation (structural, revised 2026-04-23):** C0 and C1 alone do NOT
+uniquely determine `(and, xor, or)` from `(x, y)`, regardless of input width.
+They form a 1-parameter family of linear solutions; the true bitwise result is
+only one point on that family. Example with `x=1, y=2`:
+- True:   `(and=0, xor=3, or=3)` — C0: 3+0=3 ✓  C1: 3=0+3 ✓
+- Forged: `(and=1, xor=1, or=2)` — C0: 1+2=3 ✓  C1: 2=1+1 ✓
 
-**M1 fix (2026-04-04):** The prover (`cairo_prove_program` path) now returns
-`ProveError::BitwiseBoundsViolation { count, first_x, first_y }` if any bitwise invocation
-has an input x or y >= 2^15. The verifier also independently checks each row and returns
-an error if any input is out of range. This means:
-- Programs using only ≤ 15-bit bitwise inputs: provable and verifiable.
-- Programs using ≥ 16-bit bitwise inputs: rejected at prove time (production path) and at
-  verify time (prevents a malicious proof from being accepted).
+Both pass. Range-checking outputs into `[0, 2^b)` narrows the admissible set but
+does not reduce it to a singleton.
 
-**In practice:** Programs whose bitwise inputs are at most 15 bits wide are proven correctly.
-Programs using full 31-bit inputs will now fail at the prover or verifier with a clear error.
+**What prevents exploitation today:**
+1. **Prover-side honesty.** VortexSTARK's prover derives `(and, xor, or)` from
+   Rust's native ops (`&`, `^`, `|`). A benign prover cannot produce a forged
+   row even if the constraints would admit one.
+2. **Fiat-Shamir coupling.** `bitwise_commitment` is mixed into the channel
+   before downstream challenges (PoW, FRI). A malicious from-scratch prover
+   building a forged row would shift all downstream proofs — feasible in
+   principle but forces them to generate a fully-valid alternate proof under
+   the forged row. The C0/C1 arithmetic check itself admits the forgery.
+3. **Input-width guard.** For `x, y ≥ 2^15`, `x+y` may wrap mod P, opening a
+   second class of attacks. The prover and verifier both reject any row with
+   input ≥ 2^15 via `ProveError::BitwiseBoundsViolation`.
 
-**Integration status:** Trace generation and VM invocation implemented. Standalone constraint
-evaluation not yet wired into the main prover quotient kernel (no GPU constraint kernel added).
-The builtin is available for use but its constraints are not part of the FRI-proven polynomial.
+**What this means for deployment:** A malicious prover who controls the whole
+proof (has the witness) could forge bitwise outputs that pass all current
+checks. For Starknet use cases that invoke the bitwise builtin on
+security-critical data (signature verification, hash preimages), the builtin
+is NOT safe to use as-is.
 
-**Remaining gap:** Full 31-bit soundness would require bit-decomposition of each input into
-chunks with range checks — a significant engineering effort. The current guard (reject >= 2^15)
-ensures that no unsound proof can be generated or accepted.
+**Full fix — bit decomposition (not yet implemented):**
+- Decompose each input bit-by-bit into `b` boolean columns
+- Binary constraint: `bit * (1 - bit) = 0`
+- Per-bit: `and_bit[i] = x_bit[i] * y_bit[i]`
+- Per-bit: `xor_bit[i] = x_bit[i] + y_bit[i] - 2 * x_bit[i] * y_bit[i]`
+- Per-bit: `or_bit[i] = x_bit[i] + y_bit[i] - x_bit[i] * y_bit[i]`
+- Reconstruction: `value = Σ bit[i] * 2^i` matches the column value
+
+For 32-bit inputs that's 5 × 32 = 160 extra columns per invocation.
+
+**Integration status:** Trace generation and VM invocation implemented.
+Standalone constraint evaluation not yet wired into the main prover quotient
+kernel. The builtin's current C0/C1 checks are verifier-side arithmetic
+assertions, not FRI-proven polynomial constraints.
 
 ---
 
