@@ -1029,7 +1029,10 @@ fn cairo_prove_cached_with_columns(
         // Commit directly from the GPU-resident `group` buffers — saves one full-eval-domain
         // host-to-device round-trip per group (~5-10% of ntt_blind_commit at large log_n).
         let cn: Vec<Vec<u32>> = group.iter().map(|c| c.to_host_fast()).collect();
-        let hc: Vec<Vec<u32>> = cn.iter().map(|c| Coset::permute_canonic_brt_to_hc_natural(c, log_eval_size)).collect();
+        let hc: Vec<Vec<u32>> = {
+            use rayon::prelude::*;
+            cn.par_iter().map(|c| Coset::permute_canonic_brt_to_hc_natural(c, log_eval_size)).collect()
+        };
         let (root, tile_roots) = MerkleTree::commit_root_only_with_subtrees(&group, log_eval_size);
         (root, tile_roots, cn, hc)
     };
@@ -1054,7 +1057,10 @@ fn cairo_prove_cached_with_columns(
         // Commit directly from the GPU-resident `group` buffers — saves one full-eval-domain
         // host-to-device round-trip per group (~5-10% of ntt_blind_commit at large log_n).
         let cn: Vec<Vec<u32>> = group.iter().map(|c| c.to_host_fast()).collect();
-        let hc: Vec<Vec<u32>> = cn.iter().map(|c| Coset::permute_canonic_brt_to_hc_natural(c, log_eval_size)).collect();
+        let hc: Vec<Vec<u32>> = {
+            use rayon::prelude::*;
+            cn.par_iter().map(|c| Coset::permute_canonic_brt_to_hc_natural(c, log_eval_size)).collect()
+        };
         let (root, tile_roots) = MerkleTree::commit_root_only_with_subtrees(&group, log_eval_size);
         (root, tile_roots, cn, hc)
     };
@@ -1079,7 +1085,10 @@ fn cairo_prove_cached_with_columns(
         // Commit directly from the GPU-resident `group` buffers — saves one full-eval-domain
         // host-to-device round-trip per group (~5-10% of ntt_blind_commit at large log_n).
         let cn: Vec<Vec<u32>> = group.iter().map(|c| c.to_host_fast()).collect();
-        let hc: Vec<Vec<u32>> = cn.iter().map(|c| Coset::permute_canonic_brt_to_hc_natural(c, log_eval_size)).collect();
+        let hc: Vec<Vec<u32>> = {
+            use rayon::prelude::*;
+            cn.par_iter().map(|c| Coset::permute_canonic_brt_to_hc_natural(c, log_eval_size)).collect()
+        };
         let (root, tile_roots) = MerkleTree::commit_root_only_with_subtrees(&group, log_eval_size);
         (root, tile_roots, cn, hc)
     };
