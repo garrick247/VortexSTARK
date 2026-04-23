@@ -1365,27 +1365,32 @@ fn cairo_prove_cached_with_columns(
     let rc_final_sum = rc_exec_sum.to_u32_array();
 
     // ── Compute intermediate LogUp columns T1, T2, T3 on CPU ──────────────
+    // Parallelized across rows with rayon: each i is independent. The output
+    // is transposed into column-major at the end.
     let alpha_mem_sq = alpha_mem * alpha_mem;
     let (logup_t1_trace, logup_t2_trace, logup_t3_trace): ([Vec<u32>; 4], [Vec<u32>; 4], [Vec<u32>; 4]) = {
         use crate::oods::qm31_from_m31;
+        use rayon::prelude::*;
         let s0 = d_logup_trace[0].to_host(); let s1 = d_logup_trace[1].to_host();
         let s2 = d_logup_trace[2].to_host(); let s3 = d_logup_trace[3].to_host();
-        let mut t1: [Vec<u32>; 4] = std::array::from_fn(|_| vec![0u32; n]);
-        let mut t2: [Vec<u32>; 4] = std::array::from_fn(|_| vec![0u32; n]);
-        let mut t3: [Vec<u32>; 4] = std::array::from_fn(|_| vec![0u32; n]);
-        for i in 0..n {
+        let rows: Vec<([u32; 4], [u32; 4], [u32; 4])> = (0..n).into_par_iter().map(|i| {
             let s_i = QM31::from_u32_array([s0[i], s1[i], s2[i], s3[i]]);
             let pc_v = M31(columns[COL_PC][i]); let ilo_v = M31(columns[COL_INST_LO][i]);
             let ihi_v = M31(columns[COL_INST_HI][i]); let da_v = M31(columns[COL_DST_ADDR][i]);
             let d_v = M31(columns[COL_DST][i]); let o0a_v = M31(columns[COL_OP0_ADDR][i]);
-            let o0_v = M31(columns[COL_OP0][i]); let o1a_v = M31(columns[COL_OP1_ADDR][i]);
-            let o1_v = M31(columns[COL_OP1][i]);
+            let o0_v = M31(columns[COL_OP0][i]); let _o1a_v = M31(columns[COL_OP1_ADDR][i]);
+            let _o1_v = M31(columns[COL_OP1][i]);
             let e0 = qm31_from_m31(pc_v) + alpha_mem * qm31_from_m31(ilo_v) + alpha_mem_sq * qm31_from_m31(ihi_v);
             let d0 = (z_mem - e0).inverse();
             let d1 = (z_mem - (qm31_from_m31(da_v) + alpha_mem * qm31_from_m31(d_v))).inverse();
             let d2 = (z_mem - (qm31_from_m31(o0a_v) + alpha_mem * qm31_from_m31(o0_v))).inverse();
             let t1_i = s_i + d0; let t2_i = t1_i + d1; let t3_i = t2_i + d2;
-            let a1 = t1_i.to_u32_array(); let a2 = t2_i.to_u32_array(); let a3 = t3_i.to_u32_array();
+            (t1_i.to_u32_array(), t2_i.to_u32_array(), t3_i.to_u32_array())
+        }).collect();
+        let mut t1: [Vec<u32>; 4] = std::array::from_fn(|_| vec![0u32; n]);
+        let mut t2: [Vec<u32>; 4] = std::array::from_fn(|_| vec![0u32; n]);
+        let mut t3: [Vec<u32>; 4] = std::array::from_fn(|_| vec![0u32; n]);
+        for (i, (a1, a2, a3)) in rows.into_iter().enumerate() {
             for c in 0..4 { t1[c][i] = a1[c]; t2[c][i] = a2[c]; t3[c][i] = a3[c]; }
         }
         (t1, t2, t3)
@@ -1393,16 +1398,19 @@ fn cairo_prove_cached_with_columns(
     // ── Compute intermediate RC columns U1, U2 on CPU ───────────────────
     let (rc_u1_trace, rc_u2_trace): ([Vec<u32>; 4], [Vec<u32>; 4]) = {
         use crate::oods::qm31_from_m31;
+        use rayon::prelude::*;
         let s0 = d_rc_trace[0].to_host(); let s1 = d_rc_trace[1].to_host();
         let s2 = d_rc_trace[2].to_host(); let s3 = d_rc_trace[3].to_host();
+        let rows: Vec<([u32; 4], [u32; 4])> = (0..n).into_par_iter().map(|i| {
+            let s_i = QM31::from_u32_array([s0[i], s1[i], s2[i], s3[i]]);
+            let r0 = (z_rc - qm31_from_m31(M31(columns[COL_OFF0][i]))).inverse();
+            let r1 = (z_rc - qm31_from_m31(M31(columns[COL_OFF1][i]))).inverse();
+            let u1_i = s_i + r0; let u2_i = u1_i + r1;
+            (u1_i.to_u32_array(), u2_i.to_u32_array())
+        }).collect();
         let mut u1: [Vec<u32>; 4] = std::array::from_fn(|_| vec![0u32; n]);
         let mut u2: [Vec<u32>; 4] = std::array::from_fn(|_| vec![0u32; n]);
-        for i in 0..n {
-            let s_i = QM31::from_u32_array([s0[i], s1[i], s2[i], s3[i]]);
-            let r0 = (z_rc - crate::oods::qm31_from_m31(M31(columns[COL_OFF0][i]))).inverse();
-            let r1 = (z_rc - crate::oods::qm31_from_m31(M31(columns[COL_OFF1][i]))).inverse();
-            let u1_i = s_i + r0; let u2_i = u1_i + r1;
-            let a1 = u1_i.to_u32_array(); let a2 = u2_i.to_u32_array();
+        for (i, (a1, a2)) in rows.into_iter().enumerate() {
             for c in 0..4 { u1[c][i] = a1[c]; u2[c][i] = a2[c]; }
         }
         (u1, u2)
