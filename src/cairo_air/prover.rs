@@ -1017,8 +1017,21 @@ fn cairo_prove_cached_with_columns(
         d_eval
     };
 
+    // Build GPU hc-natural buffers from the committed canonic-BRT `group`. These stay
+    // alive until the phase3 constraint kernel reuses them, saving the full 34-col
+    // host→device re-upload that used to precede quotient evaluation.
+    let build_d_hc = |group: &[DeviceBuffer<u32>]| -> Vec<DeviceBuffer<u32>> {
+        let out: Vec<DeviceBuffer<u32>> = group.iter().map(|c| {
+            let mut dst = DeviceBuffer::<u32>::alloc(eval_size);
+            unsafe { ffi::cuda_permute_canonic_brt_to_hc_natural(c.as_ptr(), dst.as_mut_ptr(), eval_size as u32, log_eval_size); }
+            dst
+        }).collect();
+        unsafe { ffi::cuda_device_sync(); }
+        out
+    };
+
     // ── Group A: cols 0..TRACE_LO ──────────────────────────────────────────
-    let (trace_commitment, tile_roots_lo, host_eval_lo, host_eval_lo_hc): ([u32; 8], Vec<[u32; 8]>, Vec<Vec<u32>>, Vec<Vec<u32>>) = {
+    let (trace_commitment, tile_roots_lo, host_eval_lo, host_eval_lo_hc, d_eval_lo_hc): ([u32; 8], Vec<[u32; 8]>, Vec<Vec<u32>>, Vec<Vec<u32>>, Vec<DeviceBuffer<u32>>) = {
         let mut group: Vec<DeviceBuffer<u32>> = Vec::with_capacity(TRACE_LO);
         for c in 0..TRACE_LO {
             let (d_eval, coeffs) = ntt_col_save(&columns[c]);
@@ -1031,21 +1044,18 @@ fn cairo_prove_cached_with_columns(
             }
         }
         unsafe { ffi::cuda_device_sync(); }
-        // Stwo NTT output is BRT-canonic. Inverse permute to natural for constraint kernel.
-        // `cn` copies the blinded BRT-canonic data to host (needed later for decommitment).
-        // Commit directly from the GPU-resident `group` buffers — saves one full-eval-domain
-        // host-to-device round-trip per group (~5-10% of ntt_blind_commit at large log_n).
         let cn: Vec<Vec<u32>> = group.iter().map(|c| c.to_host_fast()).collect();
         let hc: Vec<Vec<u32>> = {
             use rayon::prelude::*;
             cn.par_iter().map(|c| Coset::permute_canonic_brt_to_hc_natural(c, log_eval_size)).collect()
         };
+        let d_hc = build_d_hc(&group);
         let (root, tile_roots) = MerkleTree::commit_root_only_with_subtrees(&group, log_eval_size);
-        (root, tile_roots, cn, hc)
+        (root, tile_roots, cn, hc, d_hc)
     };
 
     // ── Group B: cols TRACE_LO..TRACE_VM_END (15 Cairo VM hi cols) ─────────
-    let (trace_commitment_hi, tile_roots_hi, host_eval_hi, host_eval_hi_hc): ([u32; 8], Vec<[u32; 8]>, Vec<Vec<u32>>, Vec<Vec<u32>>) = {
+    let (trace_commitment_hi, tile_roots_hi, host_eval_hi, host_eval_hi_hc, d_eval_hi_hc): ([u32; 8], Vec<[u32; 8]>, Vec<Vec<u32>>, Vec<Vec<u32>>, Vec<DeviceBuffer<u32>>) = {
         let mut group: Vec<DeviceBuffer<u32>> = Vec::with_capacity(TRACE_VM_END - TRACE_LO);
         for c in TRACE_LO..TRACE_VM_END {
             let (d_eval, coeffs) = ntt_col_save(&columns[c]);
@@ -1059,21 +1069,18 @@ fn cairo_prove_cached_with_columns(
             }
         }
         unsafe { ffi::cuda_device_sync(); }
-        // Stwo NTT output is BRT-canonic. Inverse permute to natural for constraint kernel.
-        // `cn` copies the blinded BRT-canonic data to host (needed later for decommitment).
-        // Commit directly from the GPU-resident `group` buffers — saves one full-eval-domain
-        // host-to-device round-trip per group (~5-10% of ntt_blind_commit at large log_n).
         let cn: Vec<Vec<u32>> = group.iter().map(|c| c.to_host_fast()).collect();
         let hc: Vec<Vec<u32>> = {
             use rayon::prelude::*;
             cn.par_iter().map(|c| Coset::permute_canonic_brt_to_hc_natural(c, log_eval_size)).collect()
         };
+        let d_hc = build_d_hc(&group);
         let (root, tile_roots) = MerkleTree::commit_root_only_with_subtrees(&group, log_eval_size);
-        (root, tile_roots, cn, hc)
+        (root, tile_roots, cn, hc, d_hc)
     };
 
     // ── Group C: cols TRACE_VM_END..N_COLS (3 dict linkage cols) ───────────
-    let (dict_trace_commitment, tile_roots_dict, host_eval_dict, host_eval_dict_hc): ([u32; 8], Vec<[u32; 8]>, Vec<Vec<u32>>, Vec<Vec<u32>>) = {
+    let (dict_trace_commitment, tile_roots_dict, host_eval_dict, host_eval_dict_hc, d_eval_dict_hc): ([u32; 8], Vec<[u32; 8]>, Vec<Vec<u32>>, Vec<Vec<u32>>, Vec<DeviceBuffer<u32>>) = {
         let mut group: Vec<DeviceBuffer<u32>> = Vec::with_capacity(N_COLS - TRACE_VM_END);
         for c in TRACE_VM_END..N_COLS {
             let (d_eval, coeffs) = ntt_col_save(&columns[c]);
@@ -1087,17 +1094,14 @@ fn cairo_prove_cached_with_columns(
             }
         }
         unsafe { ffi::cuda_device_sync(); }
-        // Stwo NTT output is BRT-canonic. Inverse permute to natural for constraint kernel.
-        // `cn` copies the blinded BRT-canonic data to host (needed later for decommitment).
-        // Commit directly from the GPU-resident `group` buffers — saves one full-eval-domain
-        // host-to-device round-trip per group (~5-10% of ntt_blind_commit at large log_n).
         let cn: Vec<Vec<u32>> = group.iter().map(|c| c.to_host_fast()).collect();
         let hc: Vec<Vec<u32>> = {
             use rayon::prelude::*;
             cn.par_iter().map(|c| Coset::permute_canonic_brt_to_hc_natural(c, log_eval_size)).collect()
         };
+        let d_hc = build_d_hc(&group);
         let (root, tile_roots) = MerkleTree::commit_root_only_with_subtrees(&group, log_eval_size);
-        (root, tile_roots, cn, hc)
+        (root, tile_roots, cn, hc, d_hc)
     };
 
     drop(d_zh);
@@ -1731,10 +1735,12 @@ fn cairo_prove_cached_with_columns(
     let constraint_alphas: Vec<QM31> = (0..N_CONSTRAINTS).map(|_| channel.draw_felt()).collect();
     let alpha_flat: Vec<u32> = constraint_alphas.iter().flat_map(|a| a.to_u32_array()).collect();
 
-    // Upload all trace columns to GPU for quotient evaluation (half_coset order for GPU kernel).
-    let d_quot_cols: Vec<DeviceBuffer<u32>> = (0..N_COLS)
-        .map(|c| DeviceBuffer::from_host(&host_eval_cols_hc[c]))
-        .collect();
+    // Use GPU-resident hc-natural buffers built at commit time (via
+    // cuda_permute_canonic_brt_to_hc_natural) — no re-upload.
+    let mut d_quot_cols: Vec<DeviceBuffer<u32>> = Vec::with_capacity(N_COLS);
+    d_quot_cols.extend(d_eval_lo_hc);
+    d_quot_cols.extend(d_eval_hi_hc);
+    d_quot_cols.extend(d_eval_dict_hc);
     let col_ptrs: Vec<*const u32> = d_quot_cols.iter().map(|b| b.as_ptr()).collect();
     let d_col_ptrs = DeviceBuffer::from_host(&col_ptrs);
     let d_alpha = DeviceBuffer::from_host(&alpha_flat);

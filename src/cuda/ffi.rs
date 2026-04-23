@@ -303,6 +303,16 @@ unsafe extern "C" {
         log_n: u32,
     );
 
+    /// Inverse of `cuda_permute_hc_to_canonic_brt` — takes BRT-canonic input
+    /// and writes hc-natural output. Used to produce constraint-kernel input
+    /// on GPU from committed Merkle-order data without a host round trip.
+    pub fn cuda_permute_canonic_brt_to_hc_natural(
+        src: *const u32,
+        dst: *mut u32,
+        n: u32,
+        log_n: u32,
+    );
+
     pub fn cuda_eval_at_point(
         d_coeffs: *const u32,
         d_folding_factors: *const u32,

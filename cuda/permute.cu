@@ -26,6 +26,22 @@ __global__ void permute_hc_to_canonic_brt_kernel(
     dst[j] = src[k];
 }
 
+// Inverse of the above. Same index mapping, but we read src[j] and write dst[k]
+// so that dst is hc-natural ordered from a canonic-BRT source. Used to keep the
+// constraint-kernel input GPU-resident after Merkle commit (which needs BRT-canonic).
+__global__ void permute_canonic_brt_to_hc_natural_kernel(
+    const uint32_t* __restrict__ src,
+    uint32_t* __restrict__ dst,
+    uint32_t n,
+    uint32_t log_n
+) {
+    uint32_t k = blockIdx.x * blockDim.x + threadIdx.x;
+    if (k >= n) return;
+    uint32_t cn = (k & 1u) ? (n - 1u - (k >> 1)) : (k >> 1);
+    uint32_t j = __brev(cn) >> (32u - log_n);
+    dst[k] = src[j];
+}
+
 extern "C" {
 
 void cuda_permute_hc_to_canonic_brt(
@@ -37,6 +53,17 @@ void cuda_permute_hc_to_canonic_brt(
     uint32_t threads = 256;
     uint32_t blocks = (n + threads - 1u) / threads;
     permute_hc_to_canonic_brt_kernel<<<blocks, threads>>>(src, dst, n, log_n);
+}
+
+void cuda_permute_canonic_brt_to_hc_natural(
+    const uint32_t* src,
+    uint32_t* dst,
+    uint32_t n,
+    uint32_t log_n
+) {
+    uint32_t threads = 256;
+    uint32_t blocks = (n + threads - 1u) / threads;
+    permute_canonic_brt_to_hc_natural_kernel<<<blocks, threads>>>(src, dst, n, log_n);
 }
 
 } // extern "C"
