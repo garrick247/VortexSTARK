@@ -149,12 +149,12 @@ pub struct SyscallState {
     pub deployed_contracts: Vec<DeployedContract>,
     /// Records of send_message_to_l1 syscalls (in order).
     pub l1_messages: Vec<L1Message>,
-    /// Caller address passed to get_execution_info.
-    pub caller_address: u64,
-    /// Current contract address.
-    pub contract_address: u64,
-    /// Entry-point selector.
-    pub entry_point_selector: u64,
+    /// Caller address passed to get_execution_info (full 252-bit).
+    pub caller_address: crate::felt252::Felt252,
+    /// Current contract address (full 252-bit).
+    pub contract_address: crate::felt252::Felt252,
+    /// Entry-point selector (full 252-bit).
+    pub entry_point_selector: crate::felt252::Felt252,
     /// Block number (used by get_execution_info / get_block_hash).
     pub block_number: u64,
     /// Block timestamp.
@@ -193,9 +193,9 @@ impl Default for SyscallState {
             cross_contract_calls: Vec::new(),
             deployed_contracts: Vec::new(),
             l1_messages: Vec::new(),
-            caller_address: 0,
-            contract_address: 1,
-            entry_point_selector: 0,
+            caller_address: crate::felt252::Felt252::ZERO,
+            contract_address: crate::felt252::Felt252::from_u64(1),
+            entry_point_selector: crate::felt252::Felt252::ZERO,
             block_number: 1000,
             block_timestamp: 0,
             total_gas_used: 0,
@@ -637,7 +637,11 @@ fn hint_system_call(
                     .get(&entry_pt).copied()
                     .or_else(|| ctx.contract_registry[&target].entry_points.values().next().copied())
                     .unwrap_or(0);
-                let parent_contract = ctx.syscall.contract_address;
+                // Narrow parent_contract to u64 for the execute_callee
+                // boundary (memory still u64); saved in syscall state as
+                // Felt252 for preservation across nested calls.
+                use crate::felt252::FeltExt;
+                let parent_contract = ctx.syscall.contract_address.low_u64();
                 execute_callee(target, entry_pc, entry_pt, &calldata, parent_contract, ctx)
             } else {
                 Vec::new()
@@ -792,13 +796,18 @@ fn execute_callee(
     }
 
     // Swap in callee execution context so GetExecutionInfo is correct.
+    // execute_callee still takes u64 at its signature today (memory is u64);
+    // widen to Felt252 when storing in SyscallState so wider downstream
+    // context carries through even though this particular call's values
+    // came from u64 memory cells.
+    use crate::felt252::Felt252;
     let saved_caller    = ctx.syscall.caller_address;
     let saved_contract  = ctx.syscall.contract_address;
     let saved_selector  = ctx.syscall.entry_point_selector;
     let saved_exec_base = ctx.syscall.exec_info_base;
-    ctx.syscall.caller_address       = parent_contract_address;
-    ctx.syscall.contract_address     = callee_address;
-    ctx.syscall.entry_point_selector = entry_point_selector;
+    ctx.syscall.caller_address       = Felt252::from_u64(parent_contract_address);
+    ctx.syscall.contract_address     = Felt252::from_u64(callee_address);
+    ctx.syscall.entry_point_selector = Felt252::from_u64(entry_point_selector);
     ctx.syscall.exec_info_base       = None; // fresh exec_info for this callee
 
     ctx.call_depth += 1;
@@ -858,8 +867,12 @@ fn syscall_exec_info_ptr(memory: &mut Memory, ctx: &mut HintContext) -> u64 {
     let exec_info = base + 23;
 
     // --- tx_info (19 words) ---
-    memory.set(tx_info,      1);                                // version = 1
-    memory.set(tx_info + 1,  ctx.syscall.caller_address);      // account_contract_address
+    // Context-ID fields are narrowed to u64 at the memory boundary; full
+    // felts live in SyscallState. Once the VM memory model widens to
+    // Felt252, we write all 9 M31 limbs here instead of just low64.
+    use crate::felt252::FeltExt;
+    memory.set(tx_info,      1);                                         // version = 1
+    memory.set(tx_info + 1,  ctx.syscall.caller_address.low_u64());      // account_contract_address
     memory.set(tx_info + 2,  0);                                // max_fee
     memory.set(tx_info + 3,  sentinel);                         // signature_start (empty)
     memory.set(tx_info + 4,  sentinel);                         // signature_end   (empty)
@@ -887,11 +900,11 @@ fn syscall_exec_info_ptr(memory: &mut Memory, ctx: &mut HintContext) -> u64 {
     memory.set(sentinel, 0);
 
     // --- exec_info (5 words) ---
-    memory.set(exec_info,     block_info);                      // block_info_ptr
-    memory.set(exec_info + 1, tx_info);                         // tx_info_ptr
-    memory.set(exec_info + 2, ctx.syscall.caller_address);      // caller_address
-    memory.set(exec_info + 3, ctx.syscall.contract_address);    // contract_address
-    memory.set(exec_info + 4, ctx.syscall.entry_point_selector);// entry_point_selector
+    memory.set(exec_info,     block_info);                                    // block_info_ptr
+    memory.set(exec_info + 1, tx_info);                                       // tx_info_ptr
+    memory.set(exec_info + 2, ctx.syscall.caller_address.low_u64());          // caller_address
+    memory.set(exec_info + 3, ctx.syscall.contract_address.low_u64());        // contract_address
+    memory.set(exec_info + 4, ctx.syscall.entry_point_selector.low_u64());    // entry_point_selector
 
     ctx.syscall.exec_info_base = Some(exec_info);
     exec_info

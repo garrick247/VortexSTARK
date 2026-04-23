@@ -372,11 +372,13 @@ fn cmd_prove_starknet(
 
     casm_loader::print_summary(&program);
 
-    // Build SyscallState from CLI args
+    // Build SyscallState from CLI args. caller/contract_address/selector
+    // are parsed as full Felt252 (no u64 truncation).
+    use vortexstark::felt252::Felt252;
     let mut sc = SyscallState::default();
-    sc.caller_address       = parse_hex_u64(caller);
-    sc.contract_address     = parse_hex_u64(contract_address);
-    sc.entry_point_selector = parse_hex_u64(entry_point_selector);
+    sc.caller_address       = Felt252::from_hex(caller);
+    sc.contract_address     = Felt252::from_hex(contract_address);
+    sc.entry_point_selector = Felt252::from_hex(entry_point_selector);
     sc.block_number         = block_number;
 
     if let Some(json) = storage_json {
