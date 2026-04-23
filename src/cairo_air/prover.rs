@@ -2078,31 +2078,13 @@ fn cairo_prove_cached_with_columns(
         let (interaction_evals_raw, interaction_evals_next_raw): ([[[u32; 4]; 4]; 3], [[[u32; 4]; 4]; 3]) = {
             let mut raw_z    = [[[0u32; 4]; 4]; 3];
             let mut raw_zn   = [[[0u32; 4]; 4]; 3];
-            // For OODS point evaluation, we need half_coset-ordered data for INTT.
-            // Interaction host data is canonic; inverse-permute to half_coset for INTT.
-            let srcs_hc: [Vec<Vec<u32>>; 3] = {
-                // Inverse permutation: BRT-canonic → half_coset NTT order.
-                // BRT-canonic position j has value at canonic_domain_point(BRT(j)).
-                // Half_coset NTT position for that value is canonic_to_hc_ntt(BRT(j)).
-                let inv_perm = |cn: &[Vec<u32>; 4]| -> Vec<Vec<u32>> {
-                    cn.iter().map(|col| {
-                        let n = col.len();
-                        let log_n = n.trailing_zeros();
-                        let mut hc = vec![0u32; n];
-                        for j in 0..n {
-                            let cn_nat = j.reverse_bits() >> (usize::BITS - log_n);
-                            hc[canonic_to_hc_ntt(cn_nat, log_n)] = col[j];
-                        }
-                        hc
-                    }).collect()
-                };
-                [inv_perm(&host_logup), inv_perm(&host_rc_logup), inv_perm(&host_sdict)]
-            };
-            // Use BRT-canonic data → stwo INTT → first n coefficients → eval_at_oods.
-            let interact_cn: [&[Vec<u32>; 4]; 3] = [&host_logup, &host_rc_logup, &host_sdict];
+            // Reuse the already-GPU-resident d_interaction_eval buffers instead of
+            // uploading interact_cn from host again — saves 12 × eval_size × 4B H→D
+            // per OODS. (Previous code re-uploaded for INTT even though the canonic-order
+            // eval data was already on GPU in d_interaction_eval.)
             for pi in 0..3 {
                 for k in 0..4 {
-                    let mut d = DeviceBuffer::from_host(&interact_cn[pi][k]);
+                    let mut d = d_interaction_eval[pi][k].clone_on_device();
                     ntt::interpolate_stwo(&mut d, &cache.stwo_eval_ntt);
                     let coeffs = d.to_host();
                     let val_z  = eval_at_oods_from_coeffs(&coeffs[..n], z);
