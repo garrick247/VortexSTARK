@@ -557,49 +557,22 @@ from Rust native bitwise ops. Padded to the next power of 2.
 - C0: `xor + 2*and - x - y = 0`  (bitwise identity: each bit: `xor_b + 2*and_b = x_b + y_b`)
 - C1: `or - and - xor = 0`         (bitwise identity: `or_b = and_b + xor_b`)
 
-**Soundness limitation (structural, revised 2026-04-23):** C0 and C1 alone do NOT
-uniquely determine `(and, xor, or)` from `(x, y)`, regardless of input width.
-They form a 1-parameter family of linear solutions; the true bitwise result is
-only one point on that family. Example with `x=1, y=2`:
-- True:   `(and=0, xor=3, or=3)` — C0: 3+0=3 ✓  C1: 3=0+3 ✓
-- Forged: `(and=1, xor=1, or=2)` — C0: 1+2=3 ✓  C1: 2=1+1 ✓
+**Resolution (2026-04-23):** The bitwise builtin is a non-FRI verifier-side
+check — `(x, y, and, xor, or)` rows are Merkle-committed, mixed into the
+Fiat-Shamir channel, and validated by the verifier. Since the verifier
+owns the authenticated `(x, y)` pair, it simply **recomputes the true
+bitwise result natively** (`x & y`, `x ^ y`, `x | y`) and rejects any
+mismatch. This is strictly stronger than the former C0 + C1 linear
+constraints (which admitted multiple solutions — e.g. `x=1, y=2` with
+forged `(and=1, xor=1, or=2)` satisfies both but is wrong) and removes
+the 15-bit input restriction entirely. All 32-bit `(x, y)` pairs are now
+fully sound.
 
-Both pass. Range-checking outputs into `[0, 2^b)` narrows the admissible set but
-does not reduce it to a singleton.
-
-**What prevents exploitation today:**
-1. **Prover-side honesty.** VortexSTARK's prover derives `(and, xor, or)` from
-   Rust's native ops (`&`, `^`, `|`). A benign prover cannot produce a forged
-   row even if the constraints would admit one.
-2. **Fiat-Shamir coupling.** `bitwise_commitment` is mixed into the channel
-   before downstream challenges (PoW, FRI). A malicious from-scratch prover
-   building a forged row would shift all downstream proofs — feasible in
-   principle but forces them to generate a fully-valid alternate proof under
-   the forged row. The C0/C1 arithmetic check itself admits the forgery.
-3. **Input-width guard.** For `x, y ≥ 2^15`, `x+y` may wrap mod P, opening a
-   second class of attacks. The prover and verifier both reject any row with
-   input ≥ 2^15 via `ProveError::BitwiseBoundsViolation`.
-
-**What this means for deployment:** A malicious prover who controls the whole
-proof (has the witness) could forge bitwise outputs that pass all current
-checks. For Starknet use cases that invoke the bitwise builtin on
-security-critical data (signature verification, hash preimages), the builtin
-is NOT safe to use as-is.
-
-**Full fix — bit decomposition (not yet implemented):**
-- Decompose each input bit-by-bit into `b` boolean columns
-- Binary constraint: `bit * (1 - bit) = 0`
-- Per-bit: `and_bit[i] = x_bit[i] * y_bit[i]`
-- Per-bit: `xor_bit[i] = x_bit[i] + y_bit[i] - 2 * x_bit[i] * y_bit[i]`
-- Per-bit: `or_bit[i] = x_bit[i] + y_bit[i] - x_bit[i] * y_bit[i]`
-- Reconstruction: `value = Σ bit[i] * 2^i` matches the column value
-
-For 32-bit inputs that's 5 × 32 = 160 extra columns per invocation.
-
-**Integration status:** Trace generation and VM invocation implemented.
-Standalone constraint evaluation not yet wired into the main prover quotient
-kernel. The builtin's current C0/C1 checks are verifier-side arithmetic
-assertions, not FRI-proven polynomial constraints.
+The former `ProveError::BitwiseBoundsViolation` variant has been removed.
+Bit-decomposition into per-bit columns is not needed here because the
+builtin is not in the FRI-proven polynomial; the native-recompute check
+is equivalent-to-succinct because the committed row data is already
+fully delivered to the verifier.
 
 ---
 

@@ -72,19 +72,6 @@ pub enum ProveError {
     /// Fix: lower log_n, free GPU memory held by other processes, or use a larger GPU.
     InsufficientVRAM { required_gb: f64, free_gb: f64 },
 
-    /// One or more bitwise invocations had an input value >= 2^15.
-    ///
-    /// The bitwise builtin constraint `xor + 2·and = x + y` is an exact integer identity
-    /// for any x, y. However, in the STARK proof system, this constraint is evaluated over
-    /// M31 (arithmetic mod P = 2^31−1). When x or y >= 2^15, the sum `x + y` may exceed
-    /// 2^15, and the constraint `xor + 2·and ≡ x + y (mod P)` can be satisfiable for
-    /// (xor′, and′) values that are *not* the true bitwise outputs of x and y — a soundness
-    /// violation. Without bit-decomposition, the constraint only provides full soundness
-    /// guarantees for inputs in [0, 2^15).
-    ///
-    /// Fix: restrict bitwise inputs to 15 bits, or implement bit-decomposition with
-    /// range checks for each limb.
-    BitwiseBoundsViolation { count: usize, first_x: u32, first_y: u32 },
 }
 
 impl std::fmt::Display for ProveError {
@@ -108,11 +95,6 @@ impl std::fmt::Display for ProveError {
             ProveError::InsufficientVRAM { required_gb, free_gb } =>
                 write!(f, "insufficient VRAM: proof needs {required_gb:.1} GB but only {free_gb:.1} GB \
                            is free — lower log_n, stop other GPU processes, or use a larger GPU"),
-            ProveError::BitwiseBoundsViolation { count, first_x, first_y } =>
-                write!(f, "{count} bitwise invocation(s) had input(s) >= 2^15; \
-                           the first violation was x={first_x:#x}, y={first_y:#x}. \
-                           The bitwise constraint (xor + 2·and = x + y) is only sound over M31 \
-                           for inputs in [0, 2^15). Use only 15-bit bitwise inputs."),
         }
     }
 }
@@ -766,29 +748,9 @@ fn cairo_prove_program_inner(
     let bitwise_rows = mem.extract_bitwise_invocations();
     drop(mem);
 
-    // ---- M1: Bitwise bounds check ----
-    // The constraint xor + 2·and = x + y is an exact integer identity, but over M31
-    // it is only *soundly* enforced when x, y < 2^15. For larger inputs, x + y can
-    // wrap mod P while the bitwise LHS does not, creating false-positive constraint
-    // satisfactions with wrong AND/XOR outputs.
-    {
-        let mut violation_count = 0usize;
-        let mut first_x = 0u32;
-        let mut first_y = 0u32;
-        for row in &bitwise_rows {
-            let [x, y, _, _, _] = *row;
-            if x >= (1 << 15) || y >= (1 << 15) {
-                if violation_count == 0 {
-                    first_x = x;
-                    first_y = y;
-                }
-                violation_count += 1;
-            }
-        }
-        if violation_count > 0 {
-            return Err(ProveError::BitwiseBoundsViolation { count: violation_count, first_x, first_y });
-        }
-    }
+    // Bitwise inputs up to u32::MAX are sound — the verifier recomputes
+    // (x&y, x^y, x|y) natively from the Fiat-Shamir-bound (x, y) and
+    // rejects any mismatch. No input-width restriction applies.
 
     let proof = cairo_prove_cached_with_columns(
         &program.bytecode, columns, n, log_n, &cache, None,
@@ -3204,31 +3166,23 @@ pub fn cairo_verify(proof: &CairoProof) -> Result<(), String> {
             _ => {}
         }
         channel.mix_digest(&recomputed_hash);
-        let p = crate::field::m31::P;
+        // Native recomputation — fully sound. The bitwise builtin is a non-FRI
+        // verifier-side check: the verifier owns the authenticated (x, y) via
+        // bitwise_commitment, so it can compute the true (x&y, x^y, x|y)
+        // natively and reject any mismatch. This subsumes the C0/C1 linear
+        // checks (which were non-uniquely satisfiable — see SOUNDNESS.md) and
+        // lifts the 15-bit input restriction: all 32 bits are now supported.
         for (i, row) in proof.bitwise_rows.iter().enumerate() {
             let [x, y, and, xor, or_val] = *row;
-            // Bounds check (M1): inputs must be < 2^15 for the constraint to be sound over M31.
-            // The identity xor + 2·and = x + y holds as integers for any x, y. However, over
-            // M31, a malicious prover could provide fake (and′, xor′) satisfying the *modular*
-            // identity when x + y >= 2^15. Rejecting here prevents forged bitwise results.
-            if x >= (1 << 15) || y >= (1 << 15) {
+            let true_and = x & y;
+            let true_xor = x ^ y;
+            let true_or  = x | y;
+            if and != true_and || xor != true_xor || or_val != true_or {
                 return Err(format!(
-                    "Bitwise row {i}: input out of range — x={x:#x}, y={y:#x}; \
-                     both inputs must be < 2^15 (0x8000) for soundness over M31"
+                    "Bitwise row {i}: committed (and={and:#x}, xor={xor:#x}, or={or_val:#x}) \
+                     does not match true bitwise(x={x:#x}, y={y:#x}) = \
+                     ({true_and:#x}, {true_xor:#x}, {true_or:#x})"
                 ));
-            }
-            // C0: xor + 2·and == x + y  (exact integer equality guaranteed for 15-bit inputs;
-            //     both sides < 2^16 < P so no modular reduction occurs)
-            let lhs0 = (xor as u64 + 2 * and as u64) % p as u64;
-            let rhs0 = (x   as u64 + y   as u64)     % p as u64;
-            if lhs0 != rhs0 {
-                return Err(format!("Bitwise C0 failed at row {i}: xor+2·and={lhs0} ≠ x+y={rhs0}"));
-            }
-            // C1: or ≡ and + xor (mod P)
-            let lhs1 = or_val as u64 % p as u64;
-            let rhs1 = (and as u64 + xor as u64) % p as u64;
-            if lhs1 != rhs1 {
-                return Err(format!("Bitwise C1 failed at row {i}: or={lhs1} ≠ and+xor={rhs1}"));
             }
         }
     } else if proof.bitwise_commitment.is_some() {
@@ -5624,18 +5578,38 @@ mod tests {
         cairo_verify(&proof).expect("bitwise proof should verify");
     }
 
-    /// Verifier must reject bitwise rows with inputs >= 2^15 (M1 fix).
+    /// Large inputs (≥ 2^15) are now fully supported — the verifier
+    /// recomputes the true bitwise result natively and rejects mismatches.
     #[test]
-    fn test_bitwise_large_input_rejected_by_verifier() {
+    fn test_bitwise_large_input_accepted() {
         ffi::init_memory_pool();
-        // Directly construct a proof with an out-of-range input (bypassing cairo_prove_program).
-        let pairs = vec![(0xFF00u32, 0x00FFu32)]; // 0xFF00 >= 2^15
+        let pairs = vec![(0xFF00u32, 0x00FFu32), (0xDEADBEEFu32, 0xCAFEBABEu32)];
         let proof = prove_with_bitwise(&pairs);
-        let result = cairo_verify(&proof);
-        assert!(result.is_err(), "bitwise input >= 2^15 must be rejected by verifier");
-        let err_msg = result.unwrap_err();
-        assert!(err_msg.contains("out of range") || err_msg.contains("2^15"),
-            "error should mention range: {err_msg}");
+        cairo_verify(&proof).expect("large bitwise inputs must verify");
+    }
+
+    /// A row claiming incorrect (and, xor, or) for arbitrary (x, y) must
+    /// be rejected. Previously C0 + C1 admitted forgeries; now the verifier
+    /// recomputes natively.
+    #[test]
+    fn test_bitwise_forged_outputs_rejected() {
+        ffi::init_memory_pool();
+        // x=1, y=2: C0 (1+2·1=3=1+2) and C1 (2=1+1) both accept (1,1,2)
+        // even though the true bitwise result is (0,3,3).
+        let pairs = vec![(1u32, 2u32)];
+        let mut proof = prove_with_bitwise(&pairs);
+        proof.bitwise_rows[0] = [1, 2, 1, 1, 2]; // forgery
+        let flat: Vec<u32> = proof.bitwise_rows.iter()
+            .flat_map(|row| row.iter().copied())
+            .collect();
+        proof.bitwise_commitment = Some(crate::merkle::MerkleTree::hash_leaf(&flat));
+
+        let err = cairo_verify(&proof).expect_err("forged bitwise row must be rejected");
+        // Either the native recompute check or the Fiat-Shamir channel shift
+        // will catch it; both are acceptable rejection paths.
+        assert!(
+            err.contains("does not match true bitwise") || err.contains("PoW") || err.contains("Bitwise"),
+            "rejection should be traceable, got: {err}");
     }
 
     #[test]
@@ -5850,33 +5824,6 @@ mod tests {
         }
         assert!(cairo_verify(&proof).is_err(),
             "GAP-5: tampered FRI auth path must be rejected");
-    }
-
-    // ---- M1: BitwiseBoundsViolation via cairo_prove_program ---------------
-
-    /// cairo_prove_program must return BitwiseBoundsViolation when a bitwise invocation
-    /// has an input >= 2^15.  Directly exercising the production prover path (M1 fix).
-    #[test]
-    fn test_bitwise_bounds_violation_error() {
-        // Build a program that just executes a no-op loop for 8 steps (minimum valid trace).
-        // Then inject a bitwise row with a large input via the hint context.
-        // We use prove_with_bitwise (which bypasses cairo_prove_program) but we can test
-        // the bounds-check guard directly: BitwiseBoundsViolation is returned from
-        // cairo_prove_program_inner when bitwise_rows contain large inputs.
-        // Since we cannot easily invoke cairo_prove_program with a bitwise builtin
-        // without CASM bytecode, we test the bounds-check logic directly via the
-        // extracted rows path.  The test_bitwise_large_input_rejected_by_verifier test
-        // covers the verifier side; this covers the prover guard.
-        //
-        // The actual check is in cairo_prove_program_inner, exercised here by calling
-        // cairo_prove_program on a trivial program that does NOT use bitwise (so no
-        // BitwiseBoundsViolation error), and separately checking that the enum variant
-        // Display formats correctly.
-        let err = ProveError::BitwiseBoundsViolation { count: 2, first_x: 0xFF00, first_y: 0x1234 };
-        let msg = err.to_string();
-        assert!(msg.contains("0xff00") || msg.contains("0xFF00"),
-            "error message should include first_x: {msg}");
-        assert!(msg.contains("2^15"), "error message should mention 2^15: {msg}");
     }
 
     // ---- M3: Fiat-Shamir transcript ordering test -------------------------
