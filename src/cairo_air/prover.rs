@@ -1989,10 +1989,23 @@ fn cairo_prove_cached_with_columns(
     let (quotient_commitment, tile_roots_quotient, host_q0, host_q1, host_q2, host_q3) = {
         // V_H division was already applied pointwise by the GPU kernel (via d_vh_inv).
         // GPU kernel outputs in hc-natural order; permute to BRT-canonic for Merkle commitment.
-        let hq0 = Coset::permute_hc_natural_to_canonic_brt(&q0.to_host(), log_eval_size);
-        let hq1 = Coset::permute_hc_natural_to_canonic_brt(&q1.to_host(), log_eval_size);
-        let hq2 = Coset::permute_hc_natural_to_canonic_brt(&q2.to_host(), log_eval_size);
-        let hq3 = Coset::permute_hc_natural_to_canonic_brt(&q3.to_host(), log_eval_size);
+        // The permute runs on GPU (cuda_permute_hc_to_canonic_brt) so the data stays resident
+        // — host copy is made only for later decommit work. Saves 4 × eval_size × 4B H->D trip.
+        let mut d_hq0 = DeviceBuffer::<u32>::alloc(eval_size);
+        let mut d_hq1 = DeviceBuffer::<u32>::alloc(eval_size);
+        let mut d_hq2 = DeviceBuffer::<u32>::alloc(eval_size);
+        let mut d_hq3 = DeviceBuffer::<u32>::alloc(eval_size);
+        unsafe {
+            ffi::cuda_permute_hc_to_canonic_brt(q0.as_ptr(), d_hq0.as_mut_ptr(), eval_size as u32, log_eval_size);
+            ffi::cuda_permute_hc_to_canonic_brt(q1.as_ptr(), d_hq1.as_mut_ptr(), eval_size as u32, log_eval_size);
+            ffi::cuda_permute_hc_to_canonic_brt(q2.as_ptr(), d_hq2.as_mut_ptr(), eval_size as u32, log_eval_size);
+            ffi::cuda_permute_hc_to_canonic_brt(q3.as_ptr(), d_hq3.as_mut_ptr(), eval_size as u32, log_eval_size);
+            ffi::cuda_device_sync();
+        }
+        let hq0 = d_hq0.to_host();
+        let hq1 = d_hq1.to_host();
+        let hq2 = d_hq2.to_host();
+        let hq3 = d_hq3.to_host();
 
         // Diagnostic: check degree AFTER V_H division
         #[cfg(test)]
@@ -2014,9 +2027,7 @@ fn cairo_prove_cached_with_columns(
             eprintln!("[QUOTIENT DEGREE] last non-zero at BRT positions {:?}", last_nz);
         }
 
-        let g0 = DeviceBuffer::from_host(&hq0); let g1 = DeviceBuffer::from_host(&hq1);
-        let g2 = DeviceBuffer::from_host(&hq2); let g3 = DeviceBuffer::from_host(&hq3);
-        let (root, tiles) = MerkleTree::commit_root_soa4_with_subtrees(&g0, &g1, &g2, &g3, log_eval_size);
+        let (root, tiles) = MerkleTree::commit_root_soa4_with_subtrees(&d_hq0, &d_hq1, &d_hq2, &d_hq3, log_eval_size);
         (root, tiles, hq0, hq1, hq2, hq3)
     };
     channel.mix_digest(&quotient_commitment);

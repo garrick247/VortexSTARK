@@ -292,6 +292,17 @@ unsafe extern "C" {
 
     pub fn cuda_bit_reverse_m31(data: *mut u32, log_n: u32);
 
+    /// Permute hc-natural → canonic-BRT in one GPU pass.
+    /// Equivalent to `Coset::permute_hc_natural_to_canonic_brt` on CPU.
+    /// Used to keep quotient-commit data GPU-resident instead of
+    /// round-tripping through host for the permute.
+    pub fn cuda_permute_hc_to_canonic_brt(
+        src: *const u32,
+        dst: *mut u32,
+        n: u32,
+        log_n: u32,
+    );
+
     pub fn cuda_eval_at_point(
         d_coeffs: *const u32,
         d_folding_factors: *const u32,
