@@ -80,9 +80,17 @@ struct RpcError {
 
 impl StarknetClient {
     /// Create a new client for the given RPC URL.
+    /// Uses a 30s total request timeout so unreachable endpoints fail fast
+    /// (default reqwest has no timeout → connect attempts can stall for
+    /// minutes, which is terrible for tests and prove-loop responsiveness).
     pub fn new(rpc_url: &str) -> Self {
+        let client = reqwest::Client::builder()
+            .timeout(std::time::Duration::from_secs(30))
+            .connect_timeout(std::time::Duration::from_secs(5))
+            .build()
+            .expect("build reqwest client");
         Self {
-            client: reqwest::Client::new(),
+            client,
             rpc_url: rpc_url.to_string(),
         }
     }
