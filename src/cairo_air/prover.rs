@@ -954,14 +954,17 @@ fn cairo_prove_cached_with_columns(
 
     // Compute Z_H(x) at BRT-canonic positions (matching stwo NTT output ordering).
     let d_zh = {
+        use rayon::prelude::*;
         let ho = Coset::half_odds(log_eval_size - 1);
         let half_eval = eval_size / 2;
-        let mut zh = vec![0u32; eval_size];
-        for i in 0..eval_size {
+        let trace_coset = Coset::half_coset(log_n);
+        // Each i independently looks up its BRT-reordered half_odds point and
+        // evaluates Z_H at it — trivially parallel.
+        let zh: Vec<u32> = (0..eval_size).into_par_iter().map(|i| {
             let brt_i = i.reverse_bits() >> (usize::BITS - log_eval_size as u32);
             let pt = if brt_i < half_eval { ho.at(brt_i) } else { ho.at(brt_i - half_eval).conjugate() };
-            zh[i] = Coset::coset_vanishing_at(&Coset::half_coset(log_n), pt).0;
-        }
+            Coset::coset_vanishing_at(&trace_coset, pt).0
+        }).collect();
         DeviceBuffer::from_host(&zh)
     };
 
@@ -1978,13 +1981,13 @@ fn cairo_prove_cached_with_columns(
         // q0 is the quotient C/V_H in hc natural order. To get the numerator:
         // numerator[i] = q0[i] * V_H(hc.at(i))
         let eval_dom = Coset::half_coset(log_eval_size);
-        let mut numer = vec![0u32; eval_size];
-        let mut pt = eval_dom.initial;
-        for i in 0..eval_size {
-            let vh = Coset::coset_vanishing_at(&Coset::half_coset(log_n), pt);
-            numer[i] = (crate::field::M31(q0_host[i]) * vh).0;
-            pt = pt.mul(eval_dom.step);
-        }
+        let trace_coset = Coset::half_coset(log_n);
+        use rayon::prelude::*;
+        let numer: Vec<u32> = (0..eval_size).into_par_iter().map(|i| {
+            let pt = eval_dom.at(i);
+            let vh = Coset::coset_vanishing_at(&trace_coset, pt);
+            (crate::field::M31(q0_host[i]) * vh).0
+        }).collect();
         let numer_cn = permute_half_coset_to_canonic(&numer, log_eval_size);
         let mut d_numer = DeviceBuffer::from_host(&numer_cn);
         ntt::interpolate_stwo(&mut d_numer, &cache.stwo_eval_ntt);
@@ -2313,20 +2316,17 @@ fn cairo_prove_cached_with_columns(
 
         // ── Phase 2d: compute domain points; combine into OODS quotient ──────
         // BRT-canonic domain points (matching the BRT-canonic-ordered d_eval_cols).
-        let mut d_dom_xs = DeviceBuffer::<u32>::alloc(eval_size);
-        let mut d_dom_ys = DeviceBuffer::<u32>::alloc(eval_size);
-        {
-            let mut xs = vec![0u32; eval_size];
-            let mut ys = vec![0u32; eval_size];
-            for i in 0..eval_size {
+        let (d_dom_xs, d_dom_ys) = {
+            use rayon::prelude::*;
+            let points: Vec<(u32, u32)> = (0..eval_size).into_par_iter().map(|i| {
                 let brt_i = i.reverse_bits() >> (usize::BITS - log_eval_size);
                 let pt = canonic_domain_point(brt_i, log_eval_size);
-                xs[i] = pt.x.0;
-                ys[i] = pt.y.0;
-            }
-            d_dom_xs = DeviceBuffer::from_host(&xs);
-            d_dom_ys = DeviceBuffer::from_host(&ys);
-        }
+                (pt.x.0, pt.y.0)
+            }).collect();
+            let xs: Vec<u32> = points.iter().map(|&(x, _)| x).collect();
+            let ys: Vec<u32> = points.iter().map(|&(_, y)| y).collect();
+            (DeviceBuffer::from_host(&xs), DeviceBuffer::from_host(&ys))
+        };
 
         // Pack per-accumulator metadata
         let sp_x: Vec<u32> = z.x.to_u32_array().iter().chain(z_next.x.to_u32_array().iter()).copied().collect();
