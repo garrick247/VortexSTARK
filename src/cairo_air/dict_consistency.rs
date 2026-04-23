@@ -132,6 +132,84 @@ pub fn dict_logup_table_sum(
     sum
 }
 
+// ─────────────────────────────────────────────────────────────────────────────
+// Phase 2 (FELT252_DESIGN.md Option B): Side-table types and Felt252 chain check.
+// The main trace retains M31 dict columns (as pointers). The parallel side
+// table below holds the full 252-bit key/prev/new values that the pointers
+// reference. When the rest of Phase 2 lands, the side table will be committed
+// via a Merkle root and linked to the main trace via a LogUp bus; the
+// `verify_chain_felt` below is already usable as the CPU-side cross-check.
+// ─────────────────────────────────────────────────────────────────────────────
+
+use crate::felt252::Felt252;
+
+/// One entry in the dict side table. `pointer` is the M31-valued position in
+/// the main trace that references this row; `key` / `prev_value` /
+/// `new_value` are the full Felt252 values.
+///
+/// Parallel to a `(step, u64, u64, u64)` entry in `HintContext::dict_accesses`
+/// — the u64 fields there become small pointer values (< 2^31) once the
+/// Phase 2 wiring is done; the true felt values live here.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct DictSideTableEntry {
+    pub pointer: u32,
+    pub key: Felt252,
+    pub prev_value: Felt252,
+    pub new_value: Felt252,
+}
+
+/// Felt252-typed error variant, parallel to [`DictConsistencyError::ChainViolation`].
+/// Separate variant so the u64 and felt paths can live side by side while
+/// the rest of Phase 2 is being wired.
+#[derive(Debug, Clone, PartialEq)]
+pub enum DictConsistencyErrorFelt {
+    ChainViolation {
+        key: Felt252,
+        expected_prev: Felt252,
+        actual_prev: Felt252,
+    },
+}
+
+impl std::fmt::Display for DictConsistencyErrorFelt {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        use crate::felt252::FeltExt;
+        match self {
+            DictConsistencyErrorFelt::ChainViolation { key, expected_prev, actual_prev } =>
+                write!(
+                    f,
+                    "dict chain violation at key {}: expected prev_value={}, got {}",
+                    key.to_hex_0x(), expected_prev.to_hex_0x(), actual_prev.to_hex_0x(),
+                ),
+        }
+    }
+}
+
+/// Verify the ordered access log forms a valid chain, with full Felt252
+/// values. For each key, `prev_value[i+1] == new_value[i]`; the first
+/// access to any key must have `prev_value == 0`.
+///
+/// Equivalent to [`verify_chain`] but typed on `Felt252`. Once Phase 2
+/// wiring lands, this replaces the u64 check; for now the two live
+/// side-by-side so callers can migrate incrementally.
+pub fn verify_chain_felt(
+    accesses: &[(usize, Felt252, Felt252, Felt252)],
+) -> Result<(), DictConsistencyErrorFelt> {
+    // Felt252 (= Fp) doesn't derive Hash, so key the map on its raw limbs.
+    let mut last_new: HashMap<[u64; 4], Felt252> = HashMap::new();
+    for &(_step, key, prev_value, new_value) in accesses {
+        let expected_prev = last_new.get(&key.v).copied().unwrap_or(Felt252::ZERO);
+        if prev_value != expected_prev {
+            return Err(DictConsistencyErrorFelt::ChainViolation {
+                key,
+                expected_prev,
+                actual_prev: prev_value,
+            });
+        }
+        last_new.insert(key.v, new_value);
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -201,5 +279,78 @@ mod tests {
         let table_sum = dict_logup_table_sum(&accesses, z, alpha);
         assert_eq!(exec_sum + table_sum, QM31::ZERO,
             "dict LogUp should cancel for distinct keys with same new_value");
+    }
+
+    // ── Phase 2 (Felt252 side-table) chain-check tests ────────────────────
+
+    #[test]
+    fn verify_chain_felt_empty() {
+        assert!(verify_chain_felt(&[]).is_ok());
+    }
+
+    #[test]
+    fn verify_chain_felt_single_key() {
+        let k = Felt252::from_u64(1);
+        let v0 = Felt252::ZERO;
+        let v1 = Felt252::from_u64(42);
+        let v2 = Felt252::from_u64(99);
+        let accesses = [(0usize, k, v0, v1), (1, k, v1, v2)];
+        assert!(verify_chain_felt(&accesses).is_ok());
+    }
+
+    #[test]
+    fn verify_chain_felt_violation_reported_as_felt() {
+        let k = Felt252::from_u64(1);
+        let v0 = Felt252::ZERO;
+        let v1 = Felt252::from_u64(42);
+        let wrong = Felt252::from_u64(99);
+        // Second access should have prev=42, but claims prev=99.
+        let accesses = [(0usize, k, v0, v1), (1, k, wrong, Felt252::from_u64(100))];
+        let err = verify_chain_felt(&accesses).unwrap_err();
+        match err {
+            DictConsistencyErrorFelt::ChainViolation { key, expected_prev, actual_prev } => {
+                assert_eq!(key, k);
+                assert_eq!(expected_prev, v1);
+                assert_eq!(actual_prev, wrong);
+            }
+        }
+    }
+
+    #[test]
+    fn verify_chain_felt_handles_wide_felt_keys() {
+        // Use keys that would NOT fit in u64 — exactly what Phase 2 is
+        // meant to unblock.
+        let k_small = Felt252::from_u64(1);
+        let k_wide  = Felt252::from_hex("0x0123456789abcdeffedcba9876543210deadbeefcafebabe0011223344556677");
+        let v0 = Felt252::ZERO;
+        let v_a = Felt252::from_hex("0xabcdef");
+        let v_b = Felt252::from_hex("0x7777777777777777777777777777777777777777777777777777777777777777");
+        let accesses = [
+            (0usize, k_small, v0, v_a),
+            (1,       k_wide,  v0, v_b),
+            (2,       k_small, v_a, Felt252::from_u64(99)),
+            (3,       k_wide,  v_b, Felt252::from_u64(0)),
+        ];
+        assert!(verify_chain_felt(&accesses).is_ok(),
+            "wide-felt keys must validate as independent chains");
+    }
+
+    #[test]
+    fn dict_side_table_entry_equality() {
+        // Smoke: the struct equality works so a Merkle commit can later
+        // treat entries as canonical.
+        let a = DictSideTableEntry {
+            pointer: 17,
+            key: Felt252::from_u64(1),
+            prev_value: Felt252::ZERO,
+            new_value: Felt252::from_u64(42),
+        };
+        let b = DictSideTableEntry {
+            pointer: 17,
+            key: Felt252::from_u64(1),
+            prev_value: Felt252::ZERO,
+            new_value: Felt252::from_u64(42),
+        };
+        assert_eq!(a, b);
     }
 }
