@@ -374,3 +374,91 @@ pub fn print_block_summary(block: &BlockSummary) {
         }
     }
 }
+
+// ---------------------------------------------------------------------------
+// RpcResolver — synchronous, cached class-hash → CasmProgram lookup for use
+// during sync cross-contract hint execution. Drives auto-registration from
+// `CallContract` / `LibraryCall` when the target is not pre-registered.
+// ---------------------------------------------------------------------------
+
+/// Synchronous RPC resolver with class-hash caching. Built to be called from
+/// within `HintContext` sync hint handlers; wraps the async `StarknetClient`
+/// in a dedicated current-thread tokio runtime so callers never interact
+/// with tokio directly.
+///
+/// Lookup flow:
+/// 1. `try_resolve(class_hash_u64)` formats the u64 as a hex string and checks
+///    the cache (including negative cache for previous miss / RPC error).
+/// 2. On miss, calls `starknet_getCompiledCasm`; on failure falls back to
+///    `starknet_getClass` with block=latest.
+/// 3. Returns the parsed `CasmProgram` so the caller can adapt it into a
+///    `ContractEntry`.
+///
+/// Known limitations:
+/// - Only the low 64 bits of the class_hash are observed by the caller today
+///   (felt252 truncation at the syscall boundary). Full felt256 class-hash
+///   support is blocked on the broader Felt252-everywhere rework.
+/// - RPC errors are cached as negative results so a repeatedly-called missing
+///   class doesn't keep hammering the endpoint; call `.clear_cache()` to retry.
+pub struct RpcResolver {
+    runtime: tokio::runtime::Runtime,
+    client: StarknetClient,
+    /// `None` means "we tried, RPC refused / parsed nothing" — cached to avoid re-fetching.
+    cache: std::sync::RwLock<std::collections::HashMap<u64, Option<CasmProgram>>>,
+}
+
+impl RpcResolver {
+    /// Build a resolver pointing at `rpc_url`. Prefer `StarknetClient::MAINNET_RPC`
+    /// or the Sepolia equivalent for public deployments.
+    pub fn new(rpc_url: &str) -> Self {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("build tokio runtime for RpcResolver");
+        Self {
+            runtime,
+            client: StarknetClient::new(rpc_url),
+            cache: std::sync::RwLock::new(std::collections::HashMap::new()),
+        }
+    }
+
+    /// Convenience: a resolver pointed at Starknet mainnet.
+    pub fn mainnet() -> Self { Self::new(MAINNET_RPC) }
+
+    /// Convenience: a resolver pointed at Starknet Sepolia.
+    pub fn sepolia() -> Self { Self::new(SEPOLIA_RPC) }
+
+    /// Resolve a u64 class-hash to a `CasmProgram`, caching the outcome.
+    /// Returns `None` if the RPC cannot provide compiled CASM for this class.
+    pub fn try_resolve(&self, class_hash_u64: u64) -> Option<CasmProgram> {
+        if let Some(entry) = self.cache.read().unwrap().get(&class_hash_u64) {
+            return entry.clone();
+        }
+        let hex = format!("0x{class_hash_u64:x}");
+        let result = self.runtime.block_on(async {
+            match self.client.get_compiled_casm(&hex).await {
+                Ok(p) => Ok(p),
+                Err(primary) => {
+                    match self.client.get_class(&hex, &BlockId::latest()).await {
+                        Ok(p) => Ok(p),
+                        Err(fallback) => Err(format!("getCompiledCasm: {primary}; getClass fallback: {fallback}")),
+                    }
+                }
+            }
+        });
+        let entry = match result {
+            Ok(p) => Some(p),
+            Err(e) => {
+                eprintln!("[rpc] resolve {hex} failed: {e}");
+                None
+            }
+        };
+        self.cache.write().unwrap().insert(class_hash_u64, entry.clone());
+        entry
+    }
+
+    /// Drop every cached result (positive and negative) so future calls re-fetch.
+    pub fn clear_cache(&self) {
+        self.cache.write().unwrap().clear();
+    }
+}

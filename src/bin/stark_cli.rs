@@ -109,6 +109,12 @@ enum Commands {
         /// Hash function for stwo-cairo path: blake2s (default) or poseidon252 (mainnet)
         #[arg(long, default_value = "blake2s")]
         hash: String,
+        /// Auto-resolve unregistered CallContract/LibraryCall targets via RPC.
+        /// When a callee's class_hash is not pre-registered, fetch its compiled CASM
+        /// from `--rpc` and register it in-process so the call executes instead of
+        /// returning empty retdata. Only applies to the M31 (non --stwo-cairo) path.
+        #[arg(long)]
+        resolve_rpc_callees: bool,
     },
 
     /// Prove a Cairo program with the Starknet-compatible stwo-cairo GPU pipeline.
@@ -202,7 +208,7 @@ fn main() {
         Commands::ProveStarknet {
             class_hash, rpc, output, stwo_output, steps,
             storage, caller, contract_address, entry_point_selector, block_number,
-            stwo_cairo, hash,
+            stwo_cairo, hash, resolve_rpc_callees,
         } => {
             if stwo_cairo {
                 cmd_prove_starknet_stwo_cairo(
@@ -213,7 +219,7 @@ fn main() {
                 cmd_prove_starknet(
                     &class_hash, &rpc, &output, stwo_output.as_deref(), steps,
                     storage.as_deref(), &caller, &contract_address,
-                    &entry_point_selector, block_number,
+                    &entry_point_selector, block_number, resolve_rpc_callees,
                 );
             }
         }
@@ -350,8 +356,9 @@ fn cmd_prove_starknet(
     contract_address: &str,
     entry_point_selector: &str,
     block_number: u64,
+    resolve_rpc_callees: bool,
 ) {
-    use vortexstark::cairo_air::hints::SyscallState;
+    use vortexstark::cairo_air::hints::{HintContext, SyscallState};
 
     eprintln!("Fetching CASM from Starknet RPC...");
     eprintln!("  RPC:        {rpc_url}");
@@ -409,10 +416,23 @@ fn cmd_prove_starknet(
     ffi::init_memory_pool();
 
     let t0 = Instant::now();
-    let (proof, sc_out) =
+    let (proof, sc_out) = if resolve_rpc_callees {
+        eprintln!("  rpc callee resolver: enabled ({rpc_url})");
+        let ctx = HintContext::new().with_syscall_state(sc).with_rpc(rpc_url);
+        let (proof, mut ctx_out) =
+            vortexstark::cairo_air::prover::cairo_prove_program_with_ctx(
+                &program, n_steps, log_n, ctx,
+            ).unwrap_or_else(|e| { eprintln!("ERROR: {e}"); std::process::exit(1); });
+        let resolved = ctx_out.contract_registry.len();
+        if resolved > 0 {
+            eprintln!("  rpc resolver: {resolved} contract(s) auto-registered");
+        }
+        (proof, std::mem::take(&mut ctx_out.syscall))
+    } else {
         vortexstark::cairo_air::prover::cairo_prove_program_with_syscalls(
             &program, n_steps, log_n, sc,
-        ).unwrap_or_else(|e| { eprintln!("ERROR: {e}"); std::process::exit(1); });
+        ).unwrap_or_else(|e| { eprintln!("ERROR: {e}"); std::process::exit(1); })
+    };
     let prove_ms = t0.elapsed().as_secs_f64() * 1000.0;
 
     eprintln!("  prove: {prove_ms:.1}ms");

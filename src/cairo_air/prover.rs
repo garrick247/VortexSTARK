@@ -643,8 +643,22 @@ pub fn cairo_prove_program_with_syscalls(
     log_n: u32,
     syscall_state: super::hints::SyscallState,
 ) -> Result<(CairoProof, super::hints::SyscallState), ProveError> {
-    cairo_prove_program_inner(program, n_steps, log_n, Some(syscall_state))
+    let ctx = super::hints::HintContext::new().with_syscall_state(syscall_state);
+    cairo_prove_program_inner(program, n_steps, log_n, Some(ctx))
         .map(|(proof, mut ctx)| (proof, std::mem::take(&mut ctx.syscall)))
+}
+
+/// Prove with a caller-supplied `HintContext`. Use this when the caller has
+/// pre-registered contracts, attached an RPC resolver, or otherwise customized
+/// the hint environment. Returns the (possibly mutated) HintContext so the
+/// caller can inspect `syscall`, `contract_registry`, etc.
+pub fn cairo_prove_program_with_ctx(
+    program: &super::casm_loader::CasmProgram,
+    n_steps: usize,
+    log_n: u32,
+    hint_ctx: super::hints::HintContext,
+) -> Result<(CairoProof, super::hints::HintContext), ProveError> {
+    cairo_prove_program_inner(program, n_steps, log_n, Some(hint_ctx))
 }
 
 pub fn cairo_prove_program(
@@ -659,7 +673,7 @@ fn cairo_prove_program_inner(
     program: &super::casm_loader::CasmProgram,
     n_steps: usize,
     log_n: u32,
-    syscall_state: Option<super::hints::SyscallState>,
+    prebuilt_ctx: Option<super::hints::HintContext>,
 ) -> Result<(CairoProof, super::hints::HintContext), ProveError> {
     // Refuse to prove programs with truncated felt252 bytecode values.
     // Such programs would produce proofs for wrong computations.
@@ -698,11 +712,7 @@ fn cairo_prove_program_inner(
     mem.set(initial_sp + 1, pad_addr); // return pc = pad_addr (self-loop on halt)
 
     // Thread HintContext externally so the prover can inspect dict accesses after execution.
-    let mut hint_ctx = if let Some(sc) = syscall_state {
-        super::hints::HintContext::new().with_syscall_state(sc)
-    } else {
-        super::hints::HintContext::new()
-    };
+    let mut hint_ctx = prebuilt_ctx.unwrap_or_else(super::hints::HintContext::new);
     // Execute n steps total: n_steps real program steps + (n - n_steps) self-loop padding.
     // The padding self-loop at pad_addr fills remaining rows with valid Cairo transitions.
     let columns = super::vm::execute_to_columns_with_hints(

@@ -237,6 +237,12 @@ pub struct HintContext {
     /// and decremented on exit.  Calls that would exceed `MAX_CALL_DEPTH` return empty retdata
     /// instead of recursing, preventing runaway nested calls.
     pub call_depth: usize,
+
+    /// Optional RPC resolver for auto-fetching unregistered callees from a
+    /// Starknet node. When set, a `CallContract` / `LibraryCall` that misses
+    /// `contract_registry` will try to fetch the target's compiled CASM, parse
+    /// it, auto-register it, and then execute. Set via `HintContext::with_rpc`.
+    pub rpc_resolver: Option<std::sync::Arc<super::starknet_rpc::RpcResolver>>,
 }
 
 /// Iteration state for dict squash hints.
@@ -269,11 +275,37 @@ impl HintContext {
             syscall: SyscallState::default(),
             contract_registry: HashMap::new(),
             call_depth: 0,
+            rpc_resolver: None,
         }
     }
 
     pub fn with_syscall_state(mut self, state: SyscallState) -> Self {
         self.syscall = state;
+        self
+    }
+
+    /// Enable RPC auto-resolve of unregistered cross-contract call targets by
+    /// pointing at a Starknet JSON-RPC endpoint. The resolver caches each
+    /// class_hash lookup (including negative results) for the lifetime of this
+    /// context.
+    ///
+    /// Do NOT call from inside an async (tokio) context — the resolver builds
+    /// its own current-thread runtime and `block_on` nested inside another
+    /// tokio runtime panics.
+    pub fn with_rpc(mut self, rpc_url: &str) -> Self {
+        self.rpc_resolver = Some(std::sync::Arc::new(
+            super::starknet_rpc::RpcResolver::new(rpc_url),
+        ));
+        self
+    }
+
+    /// Use an already-constructed resolver (e.g. shared across HintContexts so
+    /// the cache persists across prove invocations).
+    pub fn with_rpc_resolver(
+        mut self,
+        resolver: std::sync::Arc<super::starknet_rpc::RpcResolver>,
+    ) -> Self {
+        self.rpc_resolver = Some(resolver);
         self
     }
 
@@ -532,7 +564,18 @@ fn hint_system_call(
                 calldata.push(memory.get(syscall_ptr + 5 + i));
             }
 
-            // Execute callee if registered; otherwise return empty retdata.
+            // Execute callee if registered; otherwise try RPC auto-resolve, then fall back to empty retdata.
+            if !ctx.contract_registry.contains_key(&target) {
+                if let Some(resolver) = ctx.rpc_resolver.clone() {
+                    if let Some(program) = resolver.try_resolve(target) {
+                        let ep_map: HashMap<u64, u64> =
+                            std::iter::once((entry_pt, program.entry_point))
+                                .chain(std::iter::once((0u64, program.entry_point)))
+                                .collect();
+                        ctx.register_contract(target, program.bytecode, program.hints, ep_map);
+                    }
+                }
+            }
             let retdata = if ctx.contract_registry.contains_key(&target) && ctx.call_depth < MAX_CALL_DEPTH {
                 // Look up entry point PC.  Fall back to entry_points[0] if selector not found.
                 let entry_pc = ctx.contract_registry[&target].entry_points
