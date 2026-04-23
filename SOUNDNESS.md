@@ -315,11 +315,13 @@ incrementally per `FELT252_DESIGN.md`:
 
 **Soundness implication until VM memory widens:** A program whose runtime
 memory values exceed M31 still triggers `ProveError::ExecutionRangeViolation`
-and is refused proving. The Phase 2 groundwork above is not yet consumed by
-the trace constraints; the side-table commitment binds the prover to a
-specific `dict_side_table` value but does not (yet) enforce per-row
-correctness via a LogUp bus to the main-trace pointer columns. That LogUp
-bus is the next remaining Phase 2 piece.
+and is refused proving. The Phase 2 side-table is now fully bound: the
+verifier enforces both (1) canonical Felt252 limb encoding (each 28-bit
+M31 limb < 2^28) and (2) a per-row link that projects the side-table's
+low 31 bits and asserts equality with the Merkle-authenticated
+`dict_exec_data`. Combined with the Fiat-Shamir mix of the side-table
+commitment before `z_dict_link` is drawn, a prover cannot substitute
+arbitrary Felt252 values into the side-table without detection.
 
 ### (CLOSED 2026-03-26) Full ZK — GAP-4
 
