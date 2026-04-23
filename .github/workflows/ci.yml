@@ -54,17 +54,20 @@ jobs:
           export PATH="/usr/local/cuda/bin:$PATH"
           cargo check --lib
 
-  # Full test suite — gated on a `gpu-ci` label so it only runs when a
-  # self-hosted runner with an RTX 5090 is available. To enable:
-  #   1. Register a self-hosted runner (see reference_github_runner.md pattern)
-  #      with labels: self-hosted, gpu, rtx5090
-  #   2. Uncomment this job
-  # gpu-tests:
-  #   name: cargo test --release
-  #   runs-on: [self-hosted, gpu, rtx5090]
-  #   steps:
-  #     - uses: actions/checkout@v4
-  #     - name: cargo test --release --lib
-  #       run: cargo test --release --lib -- --test-threads=1
-  #     - name: cargo test --release --tests
-  #       run: cargo test --release --tests -- --test-threads=1
+  # Full test suite on GreenDragon (RTX 5090, WSL2 Ubuntu 24.04 with CUDA
+  # 13.2 — Windows-native nvcc rejects SDK 10.0.26100 so the runner lives
+  # inside WSL2). Tests run serially (--test-threads=1) to avoid CUDA
+  # memory-pool contention that has crashed BigDaddy in earlier runs.
+  gpu-tests:
+    name: cargo test --release (GreenDragon RTX 5090)
+    runs-on: [self-hosted, greendragon, gpu, rtx5090]
+    env:
+      PATH: /home/runner/.cargo/bin:/usr/local/cuda/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+    steps:
+      - uses: actions/checkout@v4
+      - name: Remove vendor config (CI uses crates.io + public stwo-fork)
+        run: rm -f .cargo/config.toml
+      - name: cargo test --release --lib
+        run: cargo test --release --lib -- --test-threads=1
+      - name: cargo test --release --tests
+        run: cargo test --release --tests -- --test-threads=1
