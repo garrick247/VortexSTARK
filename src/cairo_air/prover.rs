@@ -1025,10 +1025,12 @@ fn cairo_prove_cached_with_columns(
         }
         unsafe { ffi::cuda_device_sync(); }
         // Stwo NTT output is BRT-canonic. Inverse permute to natural for constraint kernel.
+        // `cn` copies the blinded BRT-canonic data to host (needed later for decommitment).
+        // Commit directly from the GPU-resident `group` buffers — saves one full-eval-domain
+        // host-to-device round-trip per group (~5-10% of ntt_blind_commit at large log_n).
         let cn: Vec<Vec<u32>> = group.iter().map(|c| c.to_host_fast()).collect();
         let hc: Vec<Vec<u32>> = cn.iter().map(|c| Coset::permute_canonic_brt_to_hc_natural(c, log_eval_size)).collect();
-        let cn_gpu: Vec<DeviceBuffer<u32>> = cn.iter().map(|c| DeviceBuffer::from_host(c)).collect();
-        let (root, tile_roots) = MerkleTree::commit_root_only_with_subtrees(&cn_gpu, log_eval_size);
+        let (root, tile_roots) = MerkleTree::commit_root_only_with_subtrees(&group, log_eval_size);
         (root, tile_roots, cn, hc)
     };
 
@@ -1048,10 +1050,12 @@ fn cairo_prove_cached_with_columns(
         }
         unsafe { ffi::cuda_device_sync(); }
         // Stwo NTT output is BRT-canonic. Inverse permute to natural for constraint kernel.
+        // `cn` copies the blinded BRT-canonic data to host (needed later for decommitment).
+        // Commit directly from the GPU-resident `group` buffers — saves one full-eval-domain
+        // host-to-device round-trip per group (~5-10% of ntt_blind_commit at large log_n).
         let cn: Vec<Vec<u32>> = group.iter().map(|c| c.to_host_fast()).collect();
         let hc: Vec<Vec<u32>> = cn.iter().map(|c| Coset::permute_canonic_brt_to_hc_natural(c, log_eval_size)).collect();
-        let cn_gpu: Vec<DeviceBuffer<u32>> = cn.iter().map(|c| DeviceBuffer::from_host(c)).collect();
-        let (root, tile_roots) = MerkleTree::commit_root_only_with_subtrees(&cn_gpu, log_eval_size);
+        let (root, tile_roots) = MerkleTree::commit_root_only_with_subtrees(&group, log_eval_size);
         (root, tile_roots, cn, hc)
     };
 
@@ -1071,10 +1075,12 @@ fn cairo_prove_cached_with_columns(
         }
         unsafe { ffi::cuda_device_sync(); }
         // Stwo NTT output is BRT-canonic. Inverse permute to natural for constraint kernel.
+        // `cn` copies the blinded BRT-canonic data to host (needed later for decommitment).
+        // Commit directly from the GPU-resident `group` buffers — saves one full-eval-domain
+        // host-to-device round-trip per group (~5-10% of ntt_blind_commit at large log_n).
         let cn: Vec<Vec<u32>> = group.iter().map(|c| c.to_host_fast()).collect();
         let hc: Vec<Vec<u32>> = cn.iter().map(|c| Coset::permute_canonic_brt_to_hc_natural(c, log_eval_size)).collect();
-        let cn_gpu: Vec<DeviceBuffer<u32>> = cn.iter().map(|c| DeviceBuffer::from_host(c)).collect();
-        let (root, tile_roots) = MerkleTree::commit_root_only_with_subtrees(&cn_gpu, log_eval_size);
+        let (root, tile_roots) = MerkleTree::commit_root_only_with_subtrees(&group, log_eval_size);
         (root, tile_roots, cn, hc)
     };
 
