@@ -19,6 +19,7 @@
 
 use vortexstark::cairo_air::hints::HintContext;
 use vortexstark::cairo_air::starknet_rpc::{RpcResolver, StarknetClient};
+use vortexstark::felt252::Felt252;
 
 #[test]
 fn rpc_resolver_wires_into_hint_context_opt_in() {
@@ -68,6 +69,24 @@ fn rpc_resolver_negative_cache_on_unreachable_endpoint() {
     // clear_cache forces re-fetch.
     resolver.clear_cache();
     let _ = resolver.try_resolve(0xdeadbeef); // will re-hit the refused endpoint
+}
+
+#[test]
+fn resolver_u64_and_felt_share_cache() {
+    // try_resolve(u64) and try_resolve_felt(Felt252) both normalize to
+    // canonical `0x`-hex. A u64-valued class_hash resolved via the Felt
+    // entry point should hit the same cache slot as the u64 call.
+    let resolver = RpcResolver::new("http://127.0.0.1:65535");
+
+    // First lookup via u64 seeds a negative cache entry.
+    let _ = resolver.try_resolve(0xabc);
+    // Second lookup via Felt252 at the same value hits cache, not network.
+    let t0 = std::time::Instant::now();
+    let _ = resolver.try_resolve_felt(Felt252::from_u64(0xabc));
+    assert!(
+        t0.elapsed() < std::time::Duration::from_millis(50),
+        "Felt-entry-point should hit the u64-seeded cache slot"
+    );
 }
 
 #[test]

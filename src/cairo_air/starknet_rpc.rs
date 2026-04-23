@@ -411,8 +411,11 @@ pub fn print_block_summary(block: &BlockSummary) {
 pub struct RpcResolver {
     runtime: tokio::runtime::Runtime,
     client: StarknetClient,
-    /// `None` means "we tried, RPC refused / parsed nothing" — cached to avoid re-fetching.
-    cache: std::sync::RwLock<std::collections::HashMap<u64, Option<CasmProgram>>>,
+    /// Keyed by the canonical `0x`-prefixed lowercase hex form of the
+    /// class_hash — the same normalization used on the wire. This lets
+    /// both `try_resolve(u64)` and `try_resolve_felt(Felt252)` share a
+    /// single cache transparently. `None` is a cached negative lookup.
+    cache: std::sync::RwLock<std::collections::HashMap<String, Option<CasmProgram>>>,
 }
 
 impl RpcResolver {
@@ -438,16 +441,35 @@ impl RpcResolver {
 
     /// Resolve a u64 class-hash to a `CasmProgram`, caching the outcome.
     /// Returns `None` if the RPC cannot provide compiled CASM for this class.
+    ///
+    /// For real mainnet Sierra class-hashes (252-bit poseidon hashes that
+    /// exceed u64), use [`try_resolve_felt`] with a [`crate::felt252::Felt252`].
     pub fn try_resolve(&self, class_hash_u64: u64) -> Option<CasmProgram> {
-        if let Some(entry) = self.cache.read().unwrap().get(&class_hash_u64) {
+        self.resolve_hex(&format!("0x{class_hash_u64:x}"))
+    }
+
+    /// Resolve a felt-valued class-hash to a `CasmProgram`, caching the
+    /// outcome. This is the right entry point for real Starknet mainnet
+    /// class_hashes, which are 252-bit and do not fit in u64.
+    ///
+    /// Shares the same string-keyed cache as [`try_resolve`], so a u64
+    /// small-value resolution and the equivalent felt resolution share
+    /// state (both normalize to canonical `0x`-prefixed lowercase hex
+    /// with no leading-zero padding).
+    pub fn try_resolve_felt(&self, class_hash: crate::felt252::Felt252) -> Option<CasmProgram> {
+        use crate::felt252::FeltExt;
+        self.resolve_hex(&class_hash.to_hex_0x())
+    }
+
+    fn resolve_hex(&self, hex: &str) -> Option<CasmProgram> {
+        if let Some(entry) = self.cache.read().unwrap().get(hex) {
             return entry.clone();
         }
-        let hex = format!("0x{class_hash_u64:x}");
         let result = self.runtime.block_on(async {
-            match self.client.get_compiled_casm(&hex).await {
+            match self.client.get_compiled_casm(hex).await {
                 Ok(p) => Ok(p),
                 Err(primary) => {
-                    match self.client.get_class(&hex, &BlockId::latest()).await {
+                    match self.client.get_class(hex, &BlockId::latest()).await {
                         Ok(p) => Ok(p),
                         Err(fallback) => Err(format!("getCompiledCasm: {primary}; getClass fallback: {fallback}")),
                     }
@@ -461,7 +483,7 @@ impl RpcResolver {
                 None
             }
         };
-        self.cache.write().unwrap().insert(class_hash_u64, entry.clone());
+        self.cache.write().unwrap().insert(hex.to_string(), entry.clone());
         entry
     }
 
