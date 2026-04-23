@@ -38,11 +38,11 @@ requires log_eval ≤ 31 (the order of M31's circle subgroup):
 |----------|-------|-------|--------|
 | Fibonacci log_n=28 | 268M elements | 2.97s | 6.9ms |
 | Fibonacci log_n=29 | 537M elements | 8.95s | 7.8ms |
-| Fibonacci log_n=30 | 1.07B elements | ~10s* | ~9ms |
+| Fibonacci log_n=30 | 1.07B elements | 19.68s | 7.6ms |
 
-*Measured pre-stwo-compat rework. Current build runs this size successfully
-(assertion cleared) but requires ~20 GB of free VRAM; re-measurement pending a
-dedicated idle GPU.
+log_n=30 requires ~20 GB of free VRAM and a single 8 GB pinned→device transfer.
+On WSL2 this works on systems with enough allocated to the VM; native Linux is
+recommended for the headline measurement.
 
 All Cairo VM numbers include 34 columns, 35 constraints, full LogUp+RC memory table, S_dict LogUp, OODS quotient, and 26-bit proof-of-work. Fibonacci numbers are the standalone single-column prover.
 
