@@ -79,35 +79,39 @@ mod sel {
 
 /// Emitted event from an emit_event syscall.
 pub struct SyscallEvent {
-    pub keys: Vec<u64>,
-    pub data: Vec<u64>,
+    /// Event keys (full Felt252).
+    pub keys: Vec<crate::felt252::Felt252>,
+    /// Event data (full Felt252).
+    pub data: Vec<crate::felt252::Felt252>,
 }
 
 /// A call_contract or library_call syscall record.
 pub struct CrossContractCall {
-    /// Contract address (call_contract) or class hash (library_call).
-    pub target: u64,
-    /// Entry-point selector.
-    pub entry_point_selector: u64,
-    /// Calldata passed to the callee.
-    pub calldata: Vec<u64>,
+    /// Contract address (call_contract) or class hash (library_call), full felt.
+    pub target: crate::felt252::Felt252,
+    /// Entry-point selector, full felt.
+    pub entry_point_selector: crate::felt252::Felt252,
+    /// Calldata passed to the callee (full felts).
+    pub calldata: Vec<crate::felt252::Felt252>,
     /// True if this was a library_call (class_hash), false if call_contract (address).
     pub is_library: bool,
 }
 
 /// A deploy syscall record.
 pub struct DeployedContract {
-    pub class_hash: u64,
-    pub salt: u64,
-    pub calldata: Vec<u64>,
-    /// Assigned mock address (= salt XOR class_hash, deterministic).
-    pub contract_address: u64,
+    pub class_hash: crate::felt252::Felt252,
+    pub salt: crate::felt252::Felt252,
+    pub calldata: Vec<crate::felt252::Felt252>,
+    /// Assigned mock address (= salt XOR class_hash, deterministic — XOR on the
+    /// low u64 limbs, higher limbs zeroed; update when the mock-address scheme
+    /// moves to a full-felt operation).
+    pub contract_address: crate::felt252::Felt252,
 }
 
 /// A send_message_to_l1 syscall record.
 pub struct L1Message {
-    pub to_address: u64,
-    pub payload: Vec<u64>,
+    pub to_address: crate::felt252::Felt252,
+    pub payload: Vec<crate::felt252::Felt252>,
 }
 
 /// A contract registered for in-process cross-contract execution.
@@ -561,16 +565,17 @@ fn hint_system_call(
         sel::EMIT_EVENT => {
             // Request:  [sel, gas, keys_len, k0..kN, data_len, d0..dN]
             // Response: [remaining_gas, err=0]
+            use crate::felt252::Felt252;
             let keys_len = memory.get(syscall_ptr + 2) as usize;
-            let mut keys = Vec::with_capacity(keys_len);
+            let mut keys: Vec<Felt252> = Vec::with_capacity(keys_len);
             for i in 0..keys_len as u64 {
-                keys.push(memory.get(syscall_ptr + 3 + i));
+                keys.push(Felt252::from_u64(memory.get(syscall_ptr + 3 + i)));
             }
             let data_offset = 3 + keys_len as u64;
             let data_len = memory.get(syscall_ptr + data_offset) as usize;
-            let mut data = Vec::with_capacity(data_len);
+            let mut data: Vec<Felt252> = Vec::with_capacity(data_len);
             for i in 0..data_len as u64 {
-                data.push(memory.get(syscall_ptr + data_offset + 1 + i));
+                data.push(Felt252::from_u64(memory.get(syscall_ptr + data_offset + 1 + i)));
             }
             let cost = gas_cost::EMIT_EVENT_BASE
                 + gas_cost::EMIT_EVENT_PER_KEY * keys_len as u64
@@ -614,9 +619,9 @@ fn hint_system_call(
             let target         = memory.get(syscall_ptr + 2);
             let entry_pt       = memory.get(syscall_ptr + 3);
             let calldata_len   = memory.get(syscall_ptr + 4) as u64;
-            let mut calldata   = Vec::with_capacity(calldata_len as usize);
+            let mut calldata_u64   = Vec::with_capacity(calldata_len as usize);
             for i in 0..calldata_len {
-                calldata.push(memory.get(syscall_ptr + 5 + i));
+                calldata_u64.push(memory.get(syscall_ptr + 5 + i));
             }
 
             // Execute callee if registered; otherwise try RPC auto-resolve, then fall back to empty retdata.
@@ -642,7 +647,7 @@ fn hint_system_call(
                 // Felt252 for preservation across nested calls.
                 use crate::felt252::FeltExt;
                 let parent_contract = ctx.syscall.contract_address.low_u64();
-                execute_callee(target, entry_pc, entry_pt, &calldata, parent_contract, ctx)
+                execute_callee(target, entry_pc, entry_pt, &calldata_u64, parent_contract, ctx)
             } else {
                 Vec::new()
             };
@@ -661,12 +666,15 @@ fn hint_system_call(
                 memory.set(syscall_ptr + resp + 3 + i as u64, v);
             }
 
-            ctx.syscall.cross_contract_calls.push(CrossContractCall {
-                target,
-                entry_point_selector: entry_pt,
-                calldata,
-                is_library: selector == sel::LIBRARY_CALL,
-            });
+            {
+                use crate::felt252::Felt252;
+                ctx.syscall.cross_contract_calls.push(CrossContractCall {
+                    target: Felt252::from_u64(target),
+                    entry_point_selector: Felt252::from_u64(entry_pt),
+                    calldata: calldata_u64.iter().copied().map(Felt252::from_u64).collect(),
+                    is_library: selector == sel::LIBRARY_CALL,
+                });
+            }
         }
 
         sel::DEPLOY => {
@@ -675,19 +683,23 @@ fn hint_system_call(
             //
             // Returns a deterministic mock address: salt XOR class_hash.
             // The deployed contract is recorded in SyscallState::deployed_contracts.
-            let class_hash   = memory.get(syscall_ptr + 2);
-            let salt         = memory.get(syscall_ptr + 3);
+            use crate::felt252::Felt252;
+            let class_hash_u64 = memory.get(syscall_ptr + 2);
+            let salt_u64       = memory.get(syscall_ptr + 3);
             let calldata_len = memory.get(syscall_ptr + 4) as u64;
-            let mut calldata = Vec::with_capacity(calldata_len as usize);
+            let mut calldata: Vec<Felt252> = Vec::with_capacity(calldata_len as usize);
             for i in 0..calldata_len {
-                calldata.push(memory.get(syscall_ptr + 5 + i));
+                calldata.push(Felt252::from_u64(memory.get(syscall_ptr + 5 + i)));
             }
-            let mock_addr = salt ^ class_hash;
+            let mock_addr_u64 = salt_u64 ^ class_hash_u64;
             let remaining = charge_gas(gas_cost::DEPLOY, memory, ctx);
             let resp = 5 + calldata_len;
-            memory.set(syscall_ptr + resp,     remaining); // remaining_gas
-            memory.set(syscall_ptr + resp + 1, 0);         // error_code
-            memory.set(syscall_ptr + resp + 2, mock_addr); // deployed contract address
+            memory.set(syscall_ptr + resp,     remaining);     // remaining_gas
+            memory.set(syscall_ptr + resp + 1, 0);             // error_code
+            memory.set(syscall_ptr + resp + 2, mock_addr_u64); // deployed contract address (u64)
+            let class_hash = Felt252::from_u64(class_hash_u64);
+            let salt       = Felt252::from_u64(salt_u64);
+            let mock_addr  = Felt252::from_u64(mock_addr_u64);
             ctx.syscall.deployed_contracts.push(DeployedContract {
                 class_hash,
                 salt,
@@ -701,11 +713,12 @@ fn hint_system_call(
             // Response: [remaining_gas, err=0]
             //
             // The message is recorded in SyscallState::l1_messages.
-            let to_address  = memory.get(syscall_ptr + 2);
+            use crate::felt252::Felt252;
+            let to_address = Felt252::from_u64(memory.get(syscall_ptr + 2));
             let payload_len = memory.get(syscall_ptr + 3) as u64;
-            let mut payload = Vec::with_capacity(payload_len as usize);
+            let mut payload: Vec<Felt252> = Vec::with_capacity(payload_len as usize);
             for i in 0..payload_len {
-                payload.push(memory.get(syscall_ptr + 4 + i));
+                payload.push(Felt252::from_u64(memory.get(syscall_ptr + 4 + i)));
             }
             let remaining = charge_gas(gas_cost::SEND_MESSAGE_TO_L1, memory, ctx);
             let resp = 4 + payload_len;
