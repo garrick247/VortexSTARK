@@ -155,9 +155,30 @@ pub struct SyscallState {
     pub block_number: u64,
     /// Block timestamp.
     pub block_timestamp: u64,
+    /// Total gas consumed across all syscalls in this run. Starknet-documented
+    /// per-syscall costs (see `gas_cost` module below). Useful as a post-proof
+    /// audit field — real Starknet transactions charge gas against this.
+    pub total_gas_used: u64,
     /// Base address of the lazily-allocated execution-info region in memory.
     /// Set on first get_execution_info call and reused for subsequent calls.
     exec_info_base: Option<u64>,
+}
+
+/// Starknet-documented syscall gas costs (values as of 2026-04-23 per the
+/// Starknet execution resources table). Used by `hint_system_call` to
+/// compute `remaining_gas` in each syscall response.
+pub mod gas_cost {
+    pub const STORAGE_READ:        u64 = 75_060;
+    pub const STORAGE_WRITE:       u64 = 93_020;
+    pub const EMIT_EVENT_BASE:     u64 = 10_800;
+    pub const EMIT_EVENT_PER_KEY:  u64 = 550;
+    pub const EMIT_EVENT_PER_DATA: u64 = 550;
+    pub const GET_EXECUTION_INFO:  u64 = 3_750;
+    pub const GET_BLOCK_HASH:      u64 = 2_280;
+    pub const CALL_CONTRACT:       u64 = 866_500; // plus nested callee costs
+    pub const LIBRARY_CALL:        u64 = 866_500;
+    pub const DEPLOY:              u64 = 1_138_950;
+    pub const SEND_MESSAGE_TO_L1:  u64 = 38_030;
 }
 
 impl Default for SyscallState {
@@ -173,6 +194,7 @@ impl Default for SyscallState {
             entry_point_selector: 0,
             block_number: 1000,
             block_timestamp: 0,
+            total_gas_used: 0,
             exec_info_base: None,
         }
     }
@@ -487,31 +509,46 @@ fn hint_system_call(
 
     // [0]: selector (felt252 low-64), [1]: gas_counter
     let selector = memory.get(syscall_ptr);
+    // Helper: consume `cost` from the gas_counter at syscall_ptr+1, return the
+    // remaining gas, and accumulate into ctx.syscall.total_gas_used. Callers
+    // write the returned value into the response buffer's remaining_gas slot.
+    // When the provided gas is insufficient we account for what was actually
+    // consumed (min(gas_in, cost)) so total_gas_used never exceeds the gas
+    // the program actually had available.
+    let charge_gas = |cost: u64, mem: &Memory, ctx: &mut HintContext| -> u64 {
+        let gas_in = mem.get(syscall_ptr + 1);
+        let consumed = gas_in.min(cost);
+        let remaining = gas_in - consumed;
+        ctx.syscall.total_gas_used = ctx.syscall.total_gas_used.saturating_add(consumed);
+        remaining
+    };
 
     match selector {
         sel::STORAGE_READ => {
             // Request:  [sel, gas, domain, key]
-            // Response: [remaining_gas=0, err=0, value]
+            // Response: [remaining_gas, err=0, value]
             let key = memory.get(syscall_ptr + 3);
             let value = ctx.syscall.storage.get(&key).copied().unwrap_or(0);
-            memory.set(syscall_ptr + 4, 0);     // remaining_gas
+            let remaining = charge_gas(gas_cost::STORAGE_READ, memory, ctx);
+            memory.set(syscall_ptr + 4, remaining);
             memory.set(syscall_ptr + 5, 0);     // error_code
             memory.set(syscall_ptr + 6, value); // value
         }
 
         sel::STORAGE_WRITE => {
             // Request:  [sel, gas, domain, key, value]
-            // Response: [remaining_gas=0, err=0]
+            // Response: [remaining_gas, err=0]
             let key   = memory.get(syscall_ptr + 3);
             let value = memory.get(syscall_ptr + 4);
             ctx.syscall.storage.insert(key, value);
-            memory.set(syscall_ptr + 5, 0); // remaining_gas
+            let remaining = charge_gas(gas_cost::STORAGE_WRITE, memory, ctx);
+            memory.set(syscall_ptr + 5, remaining);
             memory.set(syscall_ptr + 6, 0); // error_code
         }
 
         sel::EMIT_EVENT => {
             // Request:  [sel, gas, keys_len, k0..kN, data_len, d0..dN]
-            // Response: [remaining_gas=0, err=0]
+            // Response: [remaining_gas, err=0]
             let keys_len = memory.get(syscall_ptr + 2) as usize;
             let mut keys = Vec::with_capacity(keys_len);
             for i in 0..keys_len as u64 {
@@ -523,27 +560,33 @@ fn hint_system_call(
             for i in 0..data_len as u64 {
                 data.push(memory.get(syscall_ptr + data_offset + 1 + i));
             }
+            let cost = gas_cost::EMIT_EVENT_BASE
+                + gas_cost::EMIT_EVENT_PER_KEY * keys_len as u64
+                + gas_cost::EMIT_EVENT_PER_DATA * data_len as u64;
             ctx.syscall.events.push(SyscallEvent { keys, data });
+            let remaining = charge_gas(cost, memory, ctx);
             let resp = data_offset + 1 + data_len as u64;
-            memory.set(syscall_ptr + resp, 0);     // remaining_gas
+            memory.set(syscall_ptr + resp, remaining);
             memory.set(syscall_ptr + resp + 1, 0); // error_code
         }
 
         sel::GET_EXECUTION_INFO => {
             // Request:  [sel, gas]
-            // Response: [remaining_gas=0, err=0, exec_info_ptr]
+            // Response: [remaining_gas, err=0, exec_info_ptr]
             let exec_info_ptr = syscall_exec_info_ptr(memory, ctx);
-            memory.set(syscall_ptr + 2, 0);              // remaining_gas
+            let remaining = charge_gas(gas_cost::GET_EXECUTION_INFO, memory, ctx);
+            memory.set(syscall_ptr + 2, remaining);
             memory.set(syscall_ptr + 3, 0);              // error_code
             memory.set(syscall_ptr + 4, exec_info_ptr);  // exec_info_ptr
         }
 
         sel::GET_BLOCK_HASH => {
             // Request:  [sel, gas, block_number]
-            // Response: [remaining_gas=0, err=0, hash_low, hash_high]
+            // Response: [remaining_gas, err=0, hash_low, hash_high]
             // Return a deterministic mock hash = block_number (low64)
             let _block = memory.get(syscall_ptr + 2);
-            memory.set(syscall_ptr + 3, 0); // remaining_gas
+            let remaining = charge_gas(gas_cost::GET_BLOCK_HASH, memory, ctx);
+            memory.set(syscall_ptr + 3, remaining);
             memory.set(syscall_ptr + 4, 0); // error_code
             memory.set(syscall_ptr + 5, ctx.syscall.block_number); // hash (mock)
             memory.set(syscall_ptr + 6, 0); // hash high word
@@ -588,8 +631,14 @@ fn hint_system_call(
                 Vec::new()
             };
 
+            let cost = if selector == sel::LIBRARY_CALL {
+                gas_cost::LIBRARY_CALL
+            } else {
+                gas_cost::CALL_CONTRACT
+            };
+            let remaining = charge_gas(cost, memory, ctx);
             let resp = 5 + calldata_len;
-            memory.set(syscall_ptr + resp,     0);                   // remaining_gas
+            memory.set(syscall_ptr + resp,     remaining);           // remaining_gas
             memory.set(syscall_ptr + resp + 1, 0);                   // error_code
             memory.set(syscall_ptr + resp + 2, retdata.len() as u64); // ret_len
             for (i, &v) in retdata.iter().enumerate() {
@@ -618,8 +667,9 @@ fn hint_system_call(
                 calldata.push(memory.get(syscall_ptr + 5 + i));
             }
             let mock_addr = salt ^ class_hash;
+            let remaining = charge_gas(gas_cost::DEPLOY, memory, ctx);
             let resp = 5 + calldata_len;
-            memory.set(syscall_ptr + resp,     0);         // remaining_gas
+            memory.set(syscall_ptr + resp,     remaining); // remaining_gas
             memory.set(syscall_ptr + resp + 1, 0);         // error_code
             memory.set(syscall_ptr + resp + 2, mock_addr); // deployed contract address
             ctx.syscall.deployed_contracts.push(DeployedContract {
@@ -632,7 +682,7 @@ fn hint_system_call(
 
         sel::SEND_MSG_TO_L1 => {
             // Request:  [sel, gas, to_addr, payload_len, p0..pN]
-            // Response: [remaining_gas=0, err=0]
+            // Response: [remaining_gas, err=0]
             //
             // The message is recorded in SyscallState::l1_messages.
             let to_address  = memory.get(syscall_ptr + 2);
@@ -641,9 +691,10 @@ fn hint_system_call(
             for i in 0..payload_len {
                 payload.push(memory.get(syscall_ptr + 4 + i));
             }
+            let remaining = charge_gas(gas_cost::SEND_MESSAGE_TO_L1, memory, ctx);
             let resp = 4 + payload_len;
-            memory.set(syscall_ptr + resp,     0); // remaining_gas
-            memory.set(syscall_ptr + resp + 1, 0); // error_code
+            memory.set(syscall_ptr + resp,     remaining); // remaining_gas
+            memory.set(syscall_ptr + resp + 1, 0);         // error_code
             ctx.syscall.l1_messages.push(L1Message { to_address, payload });
         }
 
