@@ -2058,9 +2058,11 @@ fn cairo_prove_cached_with_columns(
         let zk_map: HashMap<usize, u32> = zk_scalars.iter().cloned().collect();
 
         // ── Phase 1: evaluate 34 trace columns at z and z_next ───────────────
-        let mut at_z    = Vec::with_capacity(N_COLS);
-        let mut at_next = Vec::with_capacity(N_COLS);
-        for col_idx in 0..N_COLS {
+        // Parallelized across columns — each eval_at_oods_from_coeffs is O(n) and
+        // independent. At log_n >= 20 this is measurable CPU work (N_COLS × 2 × n
+        // M31/QM31 ops), and the 24-core host can absorb it in parallel.
+        use rayon::prelude::*;
+        let evals: Vec<(QM31, QM31)> = (0..N_COLS).into_par_iter().map(|col_idx| {
             let coeffs = &trace_poly_coeffs[col_idx];
             let mut val_z    = eval_at_oods_from_coeffs(coeffs, z);
             let mut val_next = eval_at_oods_from_coeffs(coeffs, z_next);
@@ -2069,9 +2071,11 @@ fn cairo_prove_cached_with_columns(
                 val_z    = val_z    + r_q * zh_z;
                 val_next = val_next + r_q * zh_z_next;
             }
-            at_z.push(val_z);
-            at_next.push(val_next);
-        }
+            (val_z, val_next)
+        }).collect();
+        let mut at_z    = Vec::with_capacity(N_COLS);
+        let mut at_next = Vec::with_capacity(N_COLS);
+        for (vz, vn) in evals { at_z.push(vz); at_next.push(vn); }
         // ── Phase 1.5: evaluate 12 interaction polynomial components at z and z_next ──
         // 3 interaction polys (LogUp, RC, S_dict) × 4 M31 components = 12 evals each.
         // Batch strategy: upload each component once (H→D), keep eval-domain GPU buffer
