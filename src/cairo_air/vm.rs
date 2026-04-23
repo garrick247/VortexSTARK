@@ -53,6 +53,18 @@ const BITWISE_PAGE_LEN: usize = BITWISE_MAX_INV * 5;
 ///
 /// The bitwise page auto-fills cells 2–4 (AND, XOR, OR) when both cells 0 (x)
 /// and 1 (y) of the same invocation have been written.
+///
+/// # Felt252 overlay
+///
+/// The authoritative store is `data: Vec<u64>` because the VM and AIR
+/// operate over u64 (M31-reducing at trace ingestion). However, syscalls
+/// and RPC-resolved class hashes carry full 252-bit values that exceed
+/// u64. Rather than widening every u64 path, `Memory` keeps a sparse
+/// `felt_overlay: HashMap<addr, Felt252>` that holds the **full
+/// precision** of any address written via [`Memory::set_felt`]. Reads
+/// via [`Memory::get_felt`] return the overlay entry if present, else
+/// `Felt252::from_u64(get(addr))`. The u64 layer is always
+/// authoritative for AIR / VM execution.
 #[derive(Clone)]
 pub struct Memory {
     data: Vec<u64>,
@@ -60,16 +72,30 @@ pub struct Memory {
     bitwise: Vec<u64>,
     /// Per-invocation write flags: bit 0 = x written, bit 1 = y written.
     bitwise_flags: Vec<u8>,
+    /// Sparse Felt252 overlay — addresses whose full 252-bit value must
+    /// be preserved through the VM step. The u64 store at the same
+    /// address carries `Felt252::low_u64` for AIR consumption.
+    felt_overlay: std::collections::HashMap<u64, crate::felt252::Felt252>,
 }
 
 impl Memory {
     pub fn new() -> Self {
-        Self { data: Vec::new(), bitwise: Vec::new(), bitwise_flags: Vec::new() }
+        Self {
+            data: Vec::new(),
+            bitwise: Vec::new(),
+            bitwise_flags: Vec::new(),
+            felt_overlay: std::collections::HashMap::new(),
+        }
     }
 
     /// Create memory with pre-allocated capacity.
     pub fn with_capacity(size: usize) -> Self {
-        Self { data: vec![0u64; size], bitwise: Vec::new(), bitwise_flags: Vec::new() }
+        Self {
+            data: vec![0u64; size],
+            bitwise: Vec::new(),
+            bitwise_flags: Vec::new(),
+            felt_overlay: std::collections::HashMap::new(),
+        }
     }
 
     /// Allocate bitwise page on first use.
@@ -96,6 +122,11 @@ impl Memory {
 
     #[inline(always)]
     pub fn set(&mut self, addr: u64, val: u64) {
+        // Plain u64 write clears any Felt252 overlay at this address —
+        // otherwise a stale overlay could misrepresent the new u64 value.
+        if addr < BITWISE_MEM_BASE {
+            self.felt_overlay.remove(&addr);
+        }
         if addr >= BITWISE_MEM_BASE {
             let offset = (addr - BITWISE_MEM_BASE) as usize;
             if offset < BITWISE_PAGE_LEN {
@@ -123,6 +154,42 @@ impl Memory {
             self.data.resize(idx + 1, 0);
         }
         self.data[idx] = val;
+    }
+
+    /// Write a full Felt252 value. The low 64 bits populate the u64
+    /// store (for AIR / VM consumption); the full 252-bit value is
+    /// preserved in the overlay so [`Memory::get_felt`] returns it
+    /// without truncation.
+    pub fn set_felt(&mut self, addr: u64, val: crate::felt252::Felt252) {
+        use crate::felt252::FeltExt;
+        // Bitwise segment is u32-only by design; a Felt252 write there
+        // collapses to the low-u64 path.
+        if addr >= BITWISE_MEM_BASE {
+            self.set(addr, val.low_u64());
+            return;
+        }
+        let low = val.low_u64();
+        let idx = addr as usize;
+        if idx >= self.data.len() {
+            self.data.resize(idx + 1, 0);
+        }
+        self.data[idx] = low;
+        // Only keep the overlay entry if the value exceeds u64 — otherwise
+        // the u64 store alone represents it losslessly.
+        if val.try_to_u64().is_some() {
+            self.felt_overlay.remove(&addr);
+        } else {
+            self.felt_overlay.insert(addr, val);
+        }
+    }
+
+    /// Read the full Felt252 at `addr`. Returns the overlay entry if
+    /// present, else the u64 store widened via `Felt252::from_u64`.
+    pub fn get_felt(&self, addr: u64) -> crate::felt252::Felt252 {
+        if let Some(&v) = self.felt_overlay.get(&addr) {
+            return v;
+        }
+        crate::felt252::Felt252::from_u64(self.get(addr))
     }
 
     /// Load a program (encoded instructions) starting at address 0.
@@ -777,6 +844,36 @@ pub fn step(state: &CairoState, memory: &mut Memory) -> CairoState {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn test_felt_overlay_preserves_high_bits() {
+        use crate::felt252::{Felt252, FeltExt};
+        let mut mem = Memory::new();
+        // A full 252-bit Starknet value that exceeds u64.
+        let wide = Felt252::from_hex(
+            "0x07abcdef0123456789abcdef0123456789abcdef0123456789abcdef01234567");
+        mem.set_felt(42, wide);
+        // u64 layer carries the low 64 bits (lossy).
+        assert_eq!(mem.get(42), wide.low_u64());
+        // Felt layer returns the full 252-bit value.
+        assert_eq!(mem.get_felt(42), wide);
+        // A plain u64 write at the same address must clear the overlay —
+        // otherwise the overlay would lie about the new value.
+        mem.set(42, 7);
+        assert_eq!(mem.get(42), 7);
+        assert_eq!(mem.get_felt(42), Felt252::from_u64(7));
+    }
+
+    #[test]
+    fn test_felt_overlay_u64_sized_value_no_overlay_entry() {
+        use crate::felt252::Felt252;
+        let mut mem = Memory::new();
+        // A Felt252 that fits in u64 should not consume overlay space —
+        // the u64 store represents it losslessly.
+        mem.set_felt(5, Felt252::from_u64(0xcafe_babe));
+        assert_eq!(mem.felt_overlay.len(), 0,
+            "u64-sized Felt252 writes should not populate the overlay");
+    }
 
     #[test]
     fn test_simple_program() {

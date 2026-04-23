@@ -754,7 +754,7 @@ fn cairo_prove_program_inner(
 
     let proof = cairo_prove_cached_with_columns(
         &program.bytecode, columns, n, log_n, &cache, None,
-        &hint_ctx.dict_accesses, bitwise_rows,
+        &hint_ctx.dict_accesses, &hint_ctx.dict_accesses_felt, bitwise_rows,
     );
     Ok((proof, hint_ctx))
 }
@@ -768,7 +768,7 @@ pub fn cairo_prove_cached(
     let mut mem = Memory::with_capacity(n_steps + 200);
     mem.load_program(program);
     let columns = super::vm::execute_to_columns(&mut mem, n_steps, log_n);
-    cairo_prove_cached_with_columns(program, columns, n_steps, log_n, cache, pedersen_inputs, &[], Vec::new())
+    cairo_prove_cached_with_columns(program, columns, n_steps, log_n, cache, pedersen_inputs, &[], &[], Vec::new())
 }
 
 /// All 34 trace columns are ZK-blinded with r · Z_H(x).
@@ -804,6 +804,7 @@ fn cairo_prove_cached_with_columns(
     cache: &CairoProverCache,
     pedersen_inputs: Option<(&[super::stark252_field::Fp], &[super::stark252_field::Fp])>,
     dict_accesses: &[(usize, u64, u64, u64)],
+    dict_accesses_felt: &[(usize, crate::felt252::Felt252, crate::felt252::Felt252, crate::felt252::Felt252)],
     bitwise_rows: Vec<[u32; 5]>,
 ) -> CairoProof {
     // Phase-level wall-clock tracing, gated by env var so default builds stay quiet.
@@ -1124,10 +1125,23 @@ fn cairo_prove_cached_with_columns(
         if dict_accesses.is_empty() {
             (Vec::<[u32; 28]>::new(), [0u32; 8])
         } else {
+            // Prefer the full-precision `dict_accesses_felt` when the hint
+            // layer populated it alongside the u64 log. When it's empty
+            // (old call sites that haven't been threaded through the
+            // Felt252 pipeline yet), fall back to widening u64 via
+            // `Felt252::from_u64` — lossless for values that fit in u64,
+            // which is all cases where the felt log is absent.
+            let use_felt = dict_accesses_felt.len() == dict_accesses.len();
             let rows: Vec<[u32; 28]> = dict_accesses.iter().enumerate().map(|(i, &(_step, k, p, nv))| {
-                let key_limbs = Felt252::from_u64(k).to_m31_limbs_9();
-                let prev_limbs = Felt252::from_u64(p).to_m31_limbs_9();
-                let new_limbs = Felt252::from_u64(nv).to_m31_limbs_9();
+                let (key_f, prev_f, new_f) = if use_felt {
+                    let (_, kf, pf, nf) = dict_accesses_felt[i];
+                    (kf, pf, nf)
+                } else {
+                    (Felt252::from_u64(k), Felt252::from_u64(p), Felt252::from_u64(nv))
+                };
+                let key_limbs  = key_f.to_m31_limbs_9();
+                let prev_limbs = prev_f.to_m31_limbs_9();
+                let new_limbs  = new_f.to_m31_limbs_9();
                 let mut row = [0u32; 28];
                 row[0] = i as u32; // pointer (trace-column index)
                 row[1..10].copy_from_slice(&key_limbs);
@@ -5322,7 +5336,7 @@ mod tests {
         mem.load_program(&program);
         let columns = super::super::vm::execute_to_columns(&mut mem, 32, 5);
         let cache = CairoProverCache::new(5);
-        cairo_prove_cached_with_columns(&program, columns, 32, 5, &cache, None, dict_accesses, Vec::new())
+        cairo_prove_cached_with_columns(&program, columns, 32, 5, &cache, None, dict_accesses, &[], Vec::new())
     }
 
     #[test]
@@ -5543,7 +5557,7 @@ mod tests {
         let cache = CairoProverCache::new(log_n);
         let program_u64: Vec<u64> = program.iter().copied().collect();
         cairo_prove_cached_with_columns(&program_u64, columns, n_steps, log_n,
-            &cache, None, &[], bitwise_rows)
+            &cache, None, &[], &[], bitwise_rows)
     }
 
     #[test]

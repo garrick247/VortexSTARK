@@ -222,6 +222,12 @@ pub struct HintContext {
     /// Used by Felt252DictEntryInit to supply the prev_value witness.
     pub dicts: HashMap<u64, HashMap<u64, u64>>,
 
+    /// Parallel full-precision dict state, keyed by the same segment base
+    /// as `dicts` but carrying `HashMap<Felt252, Felt252>`. Populated by
+    /// `hint_felt252_dict_update` alongside the u64 `dicts` entry when
+    /// the written value is full-width.
+    pub dicts_felt: HashMap<u64, HashMap<crate::felt252::Felt252, crate::felt252::Felt252>>,
+
     /// Segment arena bookkeeping: dict_base → (arena_ptr, dict_idx, infos_ptr).
     ///
     /// Stored at AllocFelt252Dict time so that Felt252DictEntryUpdate can
@@ -241,6 +247,14 @@ pub struct HintContext {
     /// the dict columns (COL_DICT_KEY, COL_DICT_NEW, COL_DICT_ACTIVE) in the
     /// main execution trace, linking dict operations to the FRI-committed trace.
     pub dict_accesses: Vec<(usize, u64, u64, u64)>,
+
+    /// Parallel full-precision log of dict accesses: `(step, key, prev, new)`
+    /// as `Felt252`. Populated from `memory.get_felt` so values exceeding
+    /// u64 retain their upper 188 bits. The u64 `dict_accesses` above is
+    /// derived by narrowing these via `low_u64`. Consumed by the prover
+    /// when building the Phase 2 dict side-table so the 9×28-bit limb
+    /// encoding reflects the real 252-bit values, not just `from_u64(low)`.
+    pub dict_accesses_felt: Vec<(usize, crate::felt252::Felt252, crate::felt252::Felt252, crate::felt252::Felt252)>,
 
     /// Count of execution-time memory reads where the value exceeded M31 (P = 2^31 - 1).
     ///
@@ -298,9 +312,11 @@ impl HintContext {
         Self {
             next_segment_base: SEGMENT_BASE_DEFAULT,
             dicts: HashMap::new(),
+            dicts_felt: HashMap::new(),
             dict_arena_info: HashMap::new(),
             squash: SquashState::default(),
             dict_accesses: Vec::new(),
+            dict_accesses_felt: Vec::new(),
             execution_overflows: 0,
             syscall: SyscallState::default(),
             contract_registry: HashMap::new(),
@@ -537,25 +553,25 @@ fn hint_system_call(
             // Response: [remaining_gas, err=0, value]
             // Key and value are widened at the boundary: the u64 memory cell
             // becomes a `Felt252` for the HashMap lookup, and the returned
-            // `Felt252` is narrowed via `low_u64` back into the memory cell.
-            // Round-trips bit-exact when values fit in u64; preserves high
-            // bits in the map otherwise.
-            use crate::felt252::{Felt252, FeltExt};
-            let key_u64 = memory.get(syscall_ptr + 3);
-            let key = Felt252::from_u64(key_u64);
+            // Read the key at full Felt252 precision (via `get_felt`) so
+            // storage lookups use the real 252-bit key, and write the
+            // value into memory at full precision via `set_felt` so the
+            // Felt252 overlay preserves all 252 bits. The u64 layer
+            // carries `low_u64` for AIR consumption.
+            use crate::felt252::Felt252;
+            let key = memory.get_felt(syscall_ptr + 3);
             let value = ctx.syscall.storage.get(&key).copied().unwrap_or(Felt252::ZERO);
             let remaining = charge_gas(gas_cost::STORAGE_READ, memory, ctx);
             memory.set(syscall_ptr + 4, remaining);
             memory.set(syscall_ptr + 5, 0);                // error_code
-            memory.set(syscall_ptr + 6, value.low_u64());  // value (low 64 bits)
+            memory.set_felt(syscall_ptr + 6, value);       // full-precision value
         }
 
         sel::STORAGE_WRITE => {
             // Request:  [sel, gas, domain, key, value]
             // Response: [remaining_gas, err=0]
-            use crate::felt252::Felt252;
-            let key   = Felt252::from_u64(memory.get(syscall_ptr + 3));
-            let value = Felt252::from_u64(memory.get(syscall_ptr + 4));
+            let key   = memory.get_felt(syscall_ptr + 3);
+            let value = memory.get_felt(syscall_ptr + 4);
             ctx.syscall.storage.insert(key, value);
             let remaining = charge_gas(gas_cost::STORAGE_WRITE, memory, ctx);
             memory.set(syscall_ptr + 5, remaining);
@@ -880,12 +896,12 @@ fn syscall_exec_info_ptr(memory: &mut Memory, ctx: &mut HintContext) -> u64 {
     let exec_info = base + 23;
 
     // --- tx_info (19 words) ---
-    // Context-ID fields are narrowed to u64 at the memory boundary; full
-    // felts live in SyscallState. Once the VM memory model widens to
-    // Felt252, we write all 9 M31 limbs here instead of just low64.
-    use crate::felt252::FeltExt;
-    memory.set(tx_info,      1);                                         // version = 1
-    memory.set(tx_info + 1,  ctx.syscall.caller_address.low_u64());      // account_contract_address
+    // Full-precision Felt252 context IDs are written via `set_felt`, which
+    // stores `low_u64` in the u64 layer and preserves the upper 188 bits
+    // in the Felt252 overlay. Subsequent reads via `get_felt` return the
+    // full value.
+    memory.set(tx_info,      1);                                              // version = 1
+    memory.set_felt(tx_info + 1, ctx.syscall.caller_address);                 // account_contract_address
     memory.set(tx_info + 2,  0);                                // max_fee
     memory.set(tx_info + 3,  sentinel);                         // signature_start (empty)
     memory.set(tx_info + 4,  sentinel);                         // signature_end   (empty)
@@ -915,9 +931,9 @@ fn syscall_exec_info_ptr(memory: &mut Memory, ctx: &mut HintContext) -> u64 {
     // --- exec_info (5 words) ---
     memory.set(exec_info,     block_info);                                    // block_info_ptr
     memory.set(exec_info + 1, tx_info);                                       // tx_info_ptr
-    memory.set(exec_info + 2, ctx.syscall.caller_address.low_u64());          // caller_address
-    memory.set(exec_info + 3, ctx.syscall.contract_address.low_u64());        // contract_address
-    memory.set(exec_info + 4, ctx.syscall.entry_point_selector.low_u64());    // entry_point_selector
+    memory.set_felt(exec_info + 2, ctx.syscall.caller_address);               // caller_address
+    memory.set_felt(exec_info + 3, ctx.syscall.contract_address);             // contract_address
+    memory.set_felt(exec_info + 4, ctx.syscall.entry_point_selector);         // entry_point_selector
 
     ctx.syscall.exec_info_base = Some(exec_info);
     exec_info
@@ -1084,6 +1100,10 @@ fn hint_dict_entry_update(
 
     let key       = memory.get(dict_ptr);
     let new_value = memory.get(dict_ptr + 2);
+    // Full-precision parallel reads — if the Felt252 overlay holds wider
+    // values for these cells, these return the real 252-bit values.
+    let key_felt     = memory.get_felt(dict_ptr);
+    let new_val_felt = memory.get_felt(dict_ptr + 2);
 
     let dict_base = ctx.find_dict_base(dict_ptr);
     if let Some(base) = dict_base {
@@ -1092,8 +1112,18 @@ fn hint_dict_entry_update(
             .and_then(|d| d.get(&key))
             .copied()
             .unwrap_or(0);
+        // Full-precision prev: look up by the Felt252 key in a parallel
+        // overlay to preserve the high bits. Fall back to widening the
+        // u64 prev when the overlay has nothing for this base/key.
+        let prev_val_felt = ctx.dicts_felt
+            .get(&base)
+            .and_then(|d| d.get(&key_felt))
+            .copied()
+            .unwrap_or_else(|| crate::felt252::Felt252::from_u64(prev_value));
         ctx.dict_accesses.push((step, key, prev_value, new_value));
+        ctx.dict_accesses_felt.push((step, key_felt, prev_val_felt, new_val_felt));
         ctx.dicts.entry(base).or_default().insert(key, new_value);
+        ctx.dicts_felt.entry(base).or_default().insert(key_felt, new_val_felt);
     }
 
     // Advance dict_ptr by one entry (3 cells).

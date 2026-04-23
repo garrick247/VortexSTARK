@@ -313,15 +313,34 @@ incrementally per `FELT252_DESIGN.md`:
   quadruples; the side-table commitment above widens at the boundary,
   preserving the *committed* values but not the *memory* representation.
 
-**Soundness implication until VM memory widens:** A program whose runtime
-memory values exceed M31 still triggers `ProveError::ExecutionRangeViolation`
-and is refused proving. The Phase 2 side-table is now fully bound: the
-verifier enforces both (1) canonical Felt252 limb encoding (each 28-bit
-M31 limb < 2^28) and (2) a per-row link that projects the side-table's
-low 31 bits and asserts equality with the Merkle-authenticated
+**VM memory model (2026-04-23):** `Memory` retains a `Vec<u64>` as the
+authoritative AIR-facing store (the trace columns are still M31 and reduce
+u64 → u32 at ingestion), but now carries a sparse `felt_overlay:
+HashMap<u64, Felt252>` for addresses whose real value exceeds u64. The
+`set_felt`/`get_felt` API routes syscall writes (storage, caller_address,
+contract_address, entry_point_selector, dict keys/values that originate
+from full-felt syscall data) through the overlay, so those cells round-trip
+bit-exact at 252 bits even though the u64 layer truncates. A plain `set`
+clears any overlay entry to prevent stale reads. `HintContext` gained a
+parallel `dict_accesses_felt: Vec<(usize, Felt252, Felt252, Felt252)>` and
+`dicts_felt: HashMap<u64, HashMap<Felt252, Felt252>>`, populated alongside
+the u64 log from `memory.get_felt` — the prover's side-table encoding now
+uses these full-width values when present, falling back to
+`Felt252::from_u64` only when the felt log is absent (e.g. legacy call
+sites that haven't been threaded through the overlay yet).
+
+**Soundness implication:** The Phase 2 side-table is now fully bound at
+full precision: the verifier enforces (1) canonical Felt252 limb encoding
+(each 28-bit M31 limb < 2^28) and (2) a per-row link that projects the
+side-table's low 31 bits and asserts equality with the Merkle-authenticated
 `dict_exec_data`. Combined with the Fiat-Shamir mix of the side-table
 commitment before `z_dict_link` is drawn, a prover cannot substitute
-arbitrary Felt252 values into the side-table without detection.
+arbitrary Felt252 values into the side-table without detection. A program
+whose runtime AIR-column values exceed M31 still triggers
+`ProveError::ExecutionRangeViolation` and is refused proving (the AIR
+itself is M31); full-felt values that flow through the overlay are
+preserved for the proof-layer side-table but do not participate in AIR
+constraints.
 
 ### (CLOSED 2026-03-26) Full ZK — GAP-4
 
