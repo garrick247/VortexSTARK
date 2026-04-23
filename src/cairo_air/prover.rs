@@ -2432,13 +2432,13 @@ fn cairo_prove_cached_with_columns(
     // The fold pairs (2i, 2i+1) and the twiddle[i] = 1/y at the even pair's domain point.
     let fri_alpha = channel.draw_felt();
     let d_twid = {
+        use rayon::prelude::*;
         let half_n = eval_size / 2;
-        let mut tw = vec![0u32; half_n];
-        for i in 0..half_n {
+        let tw: Vec<u32> = (0..half_n).into_par_iter().map(|i| {
             let brt_2i = (2*i).reverse_bits() >> (usize::BITS - log_eval_size);
             let pt = canonic_domain_point(brt_2i, log_eval_size);
-            tw[i] = pt.y.inverse().0;
-        }
+            pt.y.inverse().0
+        }).collect();
         DeviceBuffer::from_host(&tw)
     };
     let mut line_eval = SecureColumn::zeros(eval_size / 2);
