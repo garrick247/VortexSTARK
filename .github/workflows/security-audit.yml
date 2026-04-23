@@ -25,8 +25,9 @@ jobs:
       - name: Install cargo-audit
         run: cargo install cargo-audit --locked
       - name: Run cargo audit
-        run: cargo audit
-        # Known-vulnerable deps in the full tree (webpki-roots vendored etc.)
-        # may produce warnings; keep the workflow non-blocking on warnings for
-        # now by not passing --deny warnings. Critical vulnerabilities will
-        # still fail via cargo-audit's default exit code behavior.
+        # Ignored advisories:
+        #   RUSTSEC-2026-0097 — rand 0.9.2 "unsound with custom logger via
+        #   rand::rng()". Upstream bug not fixed in a released version as of
+        #   2026-04-23. We don't install a custom logger, so the unsound path
+        #   is not reachable in VortexSTARK. Revisit when rand ships a fix.
+        run: cargo audit --ignore RUSTSEC-2026-0097

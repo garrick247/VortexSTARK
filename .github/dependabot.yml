@@ -1,18 +1,23 @@
 version: 2
 updates:
-  - package-ecosystem: cargo
-    directory: /
-    schedule:
-      interval: weekly
-      day: monday
-      time: "06:00"
-    open-pull-requests-limit: 5
-    labels:
-      - dependencies
-      - security
-    commit-message:
-      prefix: "deps"
-      include: scope
+  # Cargo dependency updates are disabled until the `stwo` (stwo-fork) private
+  # git dependency can be authenticated from Dependabot — it cannot resolve
+  # the lockfile without credentials for that repo and fails the whole
+  # ecosystem. Re-enable once either:
+  #   1. stwo-fork is made public, OR
+  #   2. a Dependabot secret with a PAT granting read access is configured
+  #      (repo Settings → Secrets → Dependabot).
+  # - package-ecosystem: cargo
+  #   directory: /
+  #   schedule:
+  #     interval: weekly
+  #     day: monday
+  #     time: "06:00"
+  #   open-pull-requests-limit: 5
+  #   labels: [dependencies, security]
+  #   commit-message:
+  #     prefix: "deps"
+  #     include: scope
 
   - package-ecosystem: github-actions
     directory: /
