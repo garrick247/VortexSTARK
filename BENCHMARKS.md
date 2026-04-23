@@ -662,3 +662,56 @@ Comprehensive benchmark binary with strict pre-flight GPU condition checks:
 - Background sampler records per-section peak temp/power/VRAM/clock during benchmarks
 - Correct VRAM estimates: (trace_cols + one_eval + 4 scratch) x n x 4 bytes
 
+
+## CHECKPOINT: Cairo Prove Phase Profiling (2026-04-22)
+
+Env-gated phase timing added to `cairo_prove_cached_with_columns`. Set
+`VORTEXSTARK_PROFILE=1` to emit per-phase wall-clock + cumulative times.
+Zero cost when off.
+
+### log_n=20 — 8.9s total, fibonacci.casm padded to 2^20
+
+| Phase                  | Time     | %      |
+|------------------------|---------:|-------:|
+| oods                   | 2808.6ms | 31.5%  |
+| ntt_blind_commit       | 2548.5ms | 28.6%  |
+| phase2_logup_rc        | 1788.5ms | 20.1%  |
+| phase3_quotient        |  794.6ms |  8.9%  |
+| phase4_fri             |  388.8ms |  4.4%  |
+| phase5_pow_decommit    |  234.5ms |  2.6%  |
+| sdict_interaction      |  189.1ms |  2.1%  |
+
+**Top-3 = 80.2% of prove time.**
+
+### log_n=22 — 45.7s total, fibonacci.casm padded to 2^22
+
+| Phase                  | Time      | %      |
+|------------------------|----------:|-------:|
+| ntt_blind_commit       | 15107.2ms | 33.0%  |
+| oods                   | 11172.4ms | 24.4%  |
+| phase2_logup_rc        | 11149.7ms | 24.4%  |
+| phase3_quotient        |  3615.5ms |  7.9%  |
+| phase4_fri             |  1554.2ms |  3.4%  |
+| sdict_interaction      |  1512.7ms |  3.3%  |
+| phase5_pow_decommit    |   905.1ms |  2.0%  |
+
+**Top-3 = 81.8% of prove time.**
+
+Scaling 8.9s→45.7s over 4× data = **5.1×**, consistent with `n log n`.
+Proportions stable across sizes — the optimization targets in
+`PERF_ROADMAP.md` are robust.
+
+### log_n=30 (1.07B elements) — `bench-max-size` feature
+
+```
+Fibonacci BLOWUP_BITS=1
+  prove:      19683.5ms
+  verify:         7.6ms
+  proof size:    2.7 MB
+  verified:      YES
+```
+
+First measurement of the headline since the BLOWUP_BITS=2 rework (stwo
+FriVerifier compatibility). Security dropped to 80-bit via the
+`bench-max-size` cargo feature — not for production, kept as a capability
+demonstration of the GPU scaling envelope.

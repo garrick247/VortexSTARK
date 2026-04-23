@@ -1,99 +1,143 @@
-# VortexSTARK: GPU-Native Circle STARK Prover — 7.0s for 1 Billion Elements on a Single RTX 5090
+# VortexSTARK: GPU-Native Circle STARK Prover for Starknet
 
 ## TL;DR
 
-I built a GPU-native Circle STARK prover that generates verified proofs for 1 billion trace elements in **7.0 seconds** on a single NVIDIA RTX 5090. The field stack (M31/CM31/QM31) and Circle STARK protocol match stwo exactly. Everything runs on GPU — NTT, FRI, Merkle commitments, constraint evaluation, grinding — zero CPU fallbacks in the proving pipeline.
+I built a GPU-native Circle STARK prover that produces `stwo_cairo_verifier`-compatible proofs on a single NVIDIA RTX 5090. The full stwo `CudaBackend` is implemented with zero CPU fallbacks. Every test passes, every proof verifies. Security audit closed.
 
-The stwo `CudaBackend` integration is **complete** — the full stwo-cairo AIR (all 67 Cairo components) runs through GPU-accelerated constraint evaluation. Every test passes, every proof verifies.
+Two measured modes:
 
-## Benchmarks
+| Mode | Fibonacci log_n=30 | Security | Use |
+|------|---|---|---|
+| Default (`BLOWUP_BITS=2`) | not available — max log_n=29 at 8.9s | 160-bit | production proofs |
+| `bench-max-size` feature | **19.68s / 1.07B elements, verified** | 80-bit | scaling headline |
 
-### Fibonacci STARK (standalone prover)
-
-Single RTX 5090 (Blackwell, SM_120), Fibonacci AIR, 100-bit security:
-
-| Trace Size | Elements | Proving Time | Proof Size |
-|---|---|---|---|
-| 2^20 | 1M | 116ms | 1.9 KB |
-| 2^22 | 4M | 143ms | 1.9 KB |
-| 2^24 | 16M | 217ms | 2.3 KB |
-| 2^26 | 67M | 471ms | 2.7 KB |
-| 2^28 | 268M | 1.5s | 3.1 KB |
-| 2^30 | 1.07B | **7.0s** | 3.4 KB |
-
-Steady-state throughput: **~8.6 proofs/minute** at 1B elements (amortized). All proofs verified.
-
-### stwo-cairo Full Proving Pipeline (GPU CudaBackend)
-
-Full end-to-end proving with `prove_cairo()` — VM execution, trace generation, GPU STARK proving, verification, and serialization. Single RTX 5090:
-
-| Cairo Program | Total Time | STARK Proving | Verified |
-|---|---|---|---|
-| All opcodes (67 components) | 42s | **9.4s** | yes |
-| All builtins (Pedersen, Poseidon, Bitwise, Range, Blake, EC) | 57s | **21.1s** | yes |
-| Pedersen aggregator | 48s | **14.3s** | yes |
-| Poseidon aggregator | 40s | **7.8s** | yes |
-
-**What the columns mean:**
-- **Total Time** — wall clock from program start to proof serialized, including Cairo VM execution (CPU), trace generation (CPU), STARK proving (GPU), verification, and proof output
-- **STARK Proving** — time spent in the GPU proving pipeline only (`prove_ex`): NTT, constraint evaluation, FRI protocol, Merkle commitments, grinding
-
-The GPU STARK proving is **2-5x faster** than the trace generation phase. As trace sizes scale up (millions of Cairo steps for real Starknet blocks), the GPU proving advantage widens because GPU kernels scale with trace size while per-component overhead stays constant.
-
-### Phase Breakdown (all-builtins proof, 21.1s GPU proving)
-
-| Phase | Time | Where |
-|---|---|---|
-| Constraint evaluation | ~8s | GPU bytecode interpreter (67 components) |
-| FRI protocol | ~5s | GPU fold + commit |
-| FRI quotients | ~2.4s | GPU accumulate + combine |
-| Merkle commitments | ~3s | GPU Blake2s |
-| Decommitment | ~2s | GPU tile trees + auth paths |
-| Grinding | 1.3ms | GPU Blake2s PoW (26-bit) |
+Cairo VM proving runs end-to-end through the GPU pipeline. The CLI emits `cairo-serde` JSON proofs submittable directly to the `stwo_cairo_verifier` Starknet contract.
 
 ## What's Implemented
 
 **stwo CudaBackend (4,200+ lines, 50+ tests):**
-- `PolyOps` — GPU NTT evaluate/interpolate with cached twiddles
-- `FriOps` — GPU circle-to-line and line folding
-- `MerkleOpsLifted` — GPU Blake2s leaf hashing and tree construction
-- `GrindOps` — GPU Blake2s proof-of-work (1ms for 26-bit)
-- `QuotientOps` — GPU DEEP quotient accumulation
-- `ComponentProver` — GPU bytecode constraint evaluator (per-thread + warp-cooperative kernels)
-- `ColumnOps` — GPU column types with bit-reverse, backed by DeviceBuffer
+- `PolyOps`, `FriOps`, `MerkleOpsLifted`, `GrindOps`, `QuotientOps`, `ComponentProver`, `ColumnOps`
+- All GPU-native — zero CPU fallbacks inside the proving pipeline
+- Two Merkle leaf hash choices (Blake2s + Poseidon252 for mainnet hash compat)
 
 **GPU Kernels (all CUDA, SM_120 optimized):**
-- Circle NTT — stwo-compatible twiddle format, fused shared-memory tiling, radix-4
-- FRI — fold_line, fold_circle_into_line, on-demand twiddle computation
-- Merkle trees — GPU Blake2s (leaves, nodes, tiled subtree roots)
-- Constraint evaluation — two kernels: per-thread (≤1024 registers) and warp-cooperative via `__shfl_sync` (>1024 registers, distributes register file across 32 lanes)
+- Circle NTT — stwo-compatible twiddle format, fused shared-memory tiling
+- FRI — `fold_line`, `fold_circle_into_line`, on-demand twiddle computation
+- Merkle trees — GPU Blake2s + Poseidon252 (leaves, nodes, tiled subtree roots)
+- Constraint evaluation — two kernels (per-thread ≤1024 registers; warp-cooperative via `__shfl_sync` for >1024)
 - FRI quotient accumulation with batch column evaluation
-- Barycentric polynomial evaluation
 - Batch modular inverse, bit-reverse permutation
 
 **Architecture:**
-- Field stack: M31, CM31, QM31 — identical to stwo
-- Pinned DMA transfers at full PCIe 5.0 bandwidth (37 GB/s measured)
+- M31 / CM31 / QM31 field stack — identical to stwo
+- Pinned DMA at full PCIe 5.0 bandwidth (37 GB/s measured)
 - GPU-resident FRI layer decommitment (tile-based, ~3MB vs 16GB)
-- Lazy pinned buffer pool for amortized allocation across proofs
+- Lazy pinned buffer pool amortized across proofs
+- Chunked pinned→device transfers (512 MB chunks) for WSL2 GPU-PV compatibility
 
-**Also built during this project:**
-- **OpenPTXas** — open-source PTX-to-CUBIN assembler for SM_120, with automated scoreboard emulation and a fix for a ptxas miscompilation bug affecting every NVIDIA GPU since 2014 (SM_50 through SM_120)
-- **OpenCUDA** — CUDA-subset C compiler targeting PTX/SM_120, 54 tests passing, GPU-verified on RTX 5090
+## Benchmarks (RTX 5090, CUDA 13.2, clean GPU)
+
+### Default build — `BLOWUP_BITS=2`, 160-bit security, 80 queries, 26-bit PoW
+
+| Workload | Scale | Prove | Verify |
+|----------|-------|-------|--------|
+| Fibonacci log_n=24 | 16.8M elements | 214ms | 6.2ms |
+| Fibonacci log_n=28 | 268M elements | 1.55s | 8.2ms |
+| Fibonacci log_n=29 | 537M elements | 8.9s | 7.8ms |
+| Cairo VM log_n=20 | 1.0M steps | 994ms | 112ms |
+| Cairo VM log_n=24 | 16.8M steps | 16.8s | 1.66s |
+| Cairo VM log_n=26 | 67M steps | 169s | 7.9s |
+| Poseidon2 trace+NTT log_n=28 | 8.9M hashes | 1.92s | — |
+| Pedersen GPU batch | 1M hashes | 26.6ms | — |
+
+### `bench-max-size` feature — `BLOWUP_BITS=1`, 80-bit security (scale demo)
+
+| Workload | Scale | Prove | Verify |
+|----------|-------|-------|--------|
+| Fibonacci log_n=28 | 268M elements | 2.97s | 6.9ms |
+| Fibonacci log_n=29 | 537M elements | 8.95s | 7.8ms |
+| Fibonacci log_n=30 | **1.07B elements** | **19.68s** | 7.6ms |
+
+### What the proof actually looks like
+
+1B-element Fibonacci proof: 2.7 MB, 20 FRI layers, 80 queries, PoW nonce.
+Verifies in 7.6ms. Full Merkle auth paths, OODS quotient, LogUp final sums,
+RC multiplicity commitments all checked.
+
+## End-to-End Starknet Pipeline
+
+```bash
+# Fetch + prove a mainnet contract with cross-contract auto-resolve
+stark_cli prove-starknet \
+    --class-hash 0x... \
+    --resolve-rpc-callees \
+    --rpc https://starknet-mainnet.public.blastapi.io \
+    --stwo-output proof.cairo-serde.json
+```
+
+The proof goes directly to the `stwo_cairo_verifier` Starknet contract as
+cairo-serde calldata. No reformatting step.
+
+When a `CallContract` / `LibraryCall` targets an unregistered class_hash,
+the resolver auto-fetches its compiled CASM via JSON-RPC, registers it
+in-process, and executes — so a single `stark_cli` invocation covers the
+full call graph of a real contract interaction.
+
+## Security
+
+**Audit closed (2026-04-04):** M1 bitwise bounds, M2 EC completeness, M3 FS
+ordering, L1 ZK blinding proof, L2 initial register state, L3 program hash,
+L4 U256InvModN. All findings fixed and retested.
+
+**Soundness:** 34-column trace, 35 transition constraints. 17+ tamper tests
+(trace, quotient, FRI, LogUp sums, RC sums, memory table, program hash, PoW)
+all reject. Full ZK blinding on all 34 columns via `r · Z_H(x)`.
+
+**Field:** M31 by design — stwo's Circle STARK field, not a limitation.
+Proofs are submittable directly to Starknet's on-chain verifier.
+
+## What's Not Yet
+
+- **Felt252 in dicts**: dict values are M31 today. Real Starknet contracts
+  store `felt252` — design plan is in `FELT252_DESIGN.md`, ~3–4 weeks + audit.
+  Option B (side table + pointer columns) recommended — 5–8% perf hit, no
+  pervasive trace changes, GAP-1 soundness argument extends cleanly.
+- **Cairo VM prove speed**: 169s at log_n=26 today. Profiler identifies top-3
+  phases (`oods`, `ntt_blind_commit`, `phase2_logup_rc`) = 80% of prove time.
+  Roadmap in `PERF_ROADMAP.md` projects 2–3× via kernel fusion, further 2–3×
+  via algorithmic swaps (GrandProduct LogUp, barycentric OODS). Block cadence
+  (~5s) reaches via proof aggregation or multi-GPU, not just kernel work.
+- **Full bitwise soundness**: inputs constrained < 2^15 today (rejects above);
+  31-bit needs bit-decomposition.
 
 ## Why This Matters for Starknet
 
-Starknet's production prover (stwo) runs on CPU. When proving decentralizes, GPU provers will be critical for competitive proving economics. VortexSTARK demonstrates that the stwo Circle STARK protocol runs entirely on GPU with significant speedups — and the CudaBackend integration means it plugs directly into the existing stwo-cairo proving pipeline.
+Starknet's production prover runs on CPU. Decentralized proving will need
+competitive GPU economics. VortexSTARK shows the stwo Circle STARK protocol
+runs entirely on GPU with significant speedups — and the `CudaBackend`
+plugs directly into the existing stwo-cairo pipeline.
 
-Nethermind's stwo-gpu effort (189 commits, no published benchmarks or releases) is the only other GPU attempt. VortexSTARK is shipping with benchmarks, a complete Backend implementation, and a passing test suite.
+Nethermind's `stwo-gpu` effort (189 commits, no published benchmarks or
+releases) is the only other GPU attempt. VortexSTARK ships with:
+- Passing test suite (356/356)
+- Real benchmarks from real measurements
+- Closed audit
+- On-chain-submittable proofs
+- A working RPC auto-resolve flow against mainnet
 
 ## About
 
-Built over several months of GPU architecture research, kernel development, and low-level NVIDIA reverse engineering. All benchmarks run on a single RTX 5090. The GPU kernels are hand-optimized for Blackwell (SM_120) with knowledge gained from building the assembler and compiler toolchain from scratch.
+Built over several months — GPU architecture research, kernel development,
+and low-level NVIDIA reverse engineering. All benchmarks on a single RTX 5090
+with SM_120 hand-optimized kernels. Apache-2.0-converting BSL 1.1 license
+(converts 2029-03-20).
 
-I'm looking for:
-- Feedback from the Starknet/stwo community on priorities
-- Starknet Foundation grant support for large-scale proving infrastructure
-- Partnerships with proving marketplace providers
+Looking for:
+- Starknet Foundation grant support for the Felt252 rework and perf work
+- Proving-marketplace partnerships (Gevulot-style prover-node integrations)
+- Direct engagement with the stwo team on `CudaBackend` upstreaming
 
-Happy to share more technical details, answer questions, or run benchmarks on specific workloads.
+Happy to run benchmarks on specific workloads, walk through the code, or
+demo the full cairo-serde → Starknet verifier round-trip.
+
+**Repo:** https://github.com/garrick99/VortexSTARK
