@@ -218,22 +218,22 @@ positions. The prover needed to commit to a nonce that requires 2^POW_BITS work 
 
 **Files:** `src/prover.rs` (POW_BITS const), `src/channel.rs` (`mix_u64`, `verify_pow_nonce`, `state_words`), `src/cairo_air/prover.rs` (`pow_nonce` field, GPU grind, verifier check), `cuda/grind.cu` (existing kernel, now wired up).
 
-### M1: Bitwise builtin — unsound for inputs >= 2^15 — CLOSED 2026-04-04
+### M1: Bitwise builtin — structural soundness — FULLY CLOSED 2026-04-23
 **Severity:** Medium → CLOSED
-**Root cause:** The constraint `xor + 2·and = x + y` is an exact integer identity for any x, y.
-Over M31, evaluating this constraint modulo P = 2^31−1 means that for x + y >= P, the right-hand
-side wraps while the bitwise left-hand side does not. A malicious prover could submit (xor′, and′)
-satisfying the *modular* equation without being true bitwise outputs — a forgery.
-**Fix:**
-- `cairo_prove_program` path: after extracting `bitwise_rows`, check every input x, y < 2^15.
-  If any violation is found, return `ProveError::BitwiseBoundsViolation { count, first_x, first_y }`.
-- `cairo_verify`: before checking C0/C1, check each row's inputs are < 2^15 and return error
-  with the row index and values if violated.
-**Tests added:** `test_bitwise_large_input_rejected_by_verifier` (verifier rejects forged large-input
-row), `test_bitwise_bounds_violation_error` (error Display format and enum variant sanity check).
-**Remaining limitation:** Full 31-bit soundness requires bit-decomposition. The guard prevents
-unsound proof generation and acceptance of proofs with out-of-range inputs.
-**Files:** `src/cairo_air/prover.rs` (ProveError::BitwiseBoundsViolation, prover check, verifier check).
+**Root cause (revised):** C0 `(xor + 2·and = x + y)` and C1 `(or = and + xor)` form a
+1-parameter linear system in `(and, xor, or)`. The bitwise functions are one specific
+solution on that family but not the unique one. Example: `x=1, y=2` admits the true
+`(0, 3, 3)` and the forged `(1, 1, 2)` — both satisfy C0 and C1. The previous
+15-bit input guard only closed the mod-P wrap attack, not this structural hole.
+**Fix (2026-04-23):** The bitwise builtin is a non-FRI verifier-side check — the verifier
+already owns the authenticated `(x, y)` via `bitwise_commitment`, so it now recomputes
+the true `(x & y, x ^ y, x | y)` natively and rejects any mismatch. This is strictly
+stronger than any linear algebraic constraint and lifts the 15-bit input restriction
+entirely; all 32-bit inputs are sound.
+**Tests added:** `test_bitwise_large_input_accepted` (confirms 32-bit inputs verify),
+`test_bitwise_forged_outputs_rejected` (forged row rejected).
+**Variant removed:** `ProveError::BitwiseBoundsViolation` is no longer needed.
+**Files:** `src/cairo_air/prover.rs` (native recompute in verifier, former prover guard removed).
 
 ### M2: EC constraint completeness — DOCUMENTED 2026-04-04
 **Severity:** Medium → Documented (no missing constraints found)
@@ -348,7 +348,7 @@ All expected values computed using Python `pow(a, -1, n)` / `math.gcd(a, n)`.
 | Execution range gate | 2 | Overflow detected, valid program passes |
 | Proof serialization | 1 | Prove → JSON → deserialize → verify roundtrip |
 | OODS quotient formula | 1 | test_soundness_oods_quotient_tamper — fake OODS quotient rejected |
-| Bitwise builtin | 5 | Memory auto-fill, prove/verify roundtrip, large-input rejected (M1), tamper AND, tamper commitment |
+| Bitwise builtin | 6 | Memory auto-fill, prove/verify roundtrip, large-input accepted (32-bit sound), forged-row rejected, tamper AND, tamper commitment |
 | Fiat-Shamir transcript ordering | 1 | test_transcript_order_consistency — 12 commitment tampers all rejected (M3) |
 | Property / cross-validation | ~30 | Random programs, reference VM comparison, soundness mutations |
 | **Total** | **326** (lib) **+ 30** (integration) | Updated 2026-04-04 |
@@ -393,8 +393,9 @@ on a valid proof is a soundness/completeness bug.
 8. **Execution range gate** (GAP-2 closed): confirm `execute_to_columns_with_hints` catches all
    data-path memory reads (op0, op1, direct reads) and that the non-hint path is unreachable from
    production entry points with Stark252 programs
-9. **Bitwise bounds** (M1 CLOSED 2026-04-04): `ProveError::BitwiseBoundsViolation` returned for
-   inputs >= 2^15; verifier independently checks the same bound
+9. **Bitwise builtin** (M1 FULLY CLOSED 2026-04-23): verifier recomputes
+   `(x & y, x ^ y, x | y)` natively from the Fiat-Shamir-bound `(x, y)` and
+   rejects mismatches; all 32-bit inputs sound
 
 ---
 
@@ -427,7 +428,7 @@ on a valid proof is a soundness/completeness bug.
 - [x] OODS quotient formula check — verifier recomputes Q(p) from decommitted trace + AIR quotient values; fake polynomial rejected (`test_soundness_oods_quotient_tamper`)
 - [ ] Formal FRI security analysis for Circle group — see GAP-5; current argument documented in SOUNDNESS.md
 - [x] Proof-of-work nonce (GAP-6 CLOSED): `pow_nonce` in `CairoProof`, GPU grind + verifier check
-- [x] Bitwise bounds guard (M1 CLOSED 2026-04-04): `ProveError::BitwiseBoundsViolation`, prover + verifier check, `test_bitwise_large_input_rejected_by_verifier`
+- [x] Bitwise builtin fully sound (M1 FULLY CLOSED 2026-04-23): verifier native recompute; 32-bit inputs accepted; `test_bitwise_large_input_accepted`, `test_bitwise_forged_outputs_rejected`
 - [x] EC constraint completeness (M2 DOCUMENTED 2026-04-04): doubling (3 constraints), addition (3 constraints), degenerate cases — all documented in AUDIT.md §M2
 - [x] Fiat-Shamir transcript ordering test (M3 CLOSED 2026-04-04): `test_transcript_order_consistency` — 12 commitment points all covered
 - [x] ZK blinding formal argument expanded (L1 CLOSED 2026-04-04): SOUNDNESS.md §GAP-4 now has step-by-step proof for denominator columns
