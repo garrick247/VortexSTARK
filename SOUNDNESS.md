@@ -745,30 +745,17 @@ Implementation:
 
 Estimated effort: ~150 lines (kernel + verifier OODS + FS mixing).
 
-### R2. Dict memory bus link
+### R2. Dict memory bus link (CLOSED 2026-04-23)
 
-**Status (2026-04-23):** The bitwise builtin has a full memory bus link
-(verifier scans `memory_table_data` for bitwise addresses and cross-checks
-against `bitwise_rows`). Dicts have the S_dict link to the main trace's
-`COL_DICT_KEY`/`COL_DICT_NEW` columns, the exec-log to side-table
-low-31-bit link, and the canonical-limb check — but no scan over
-`memory_table_data` for dict-pointer addresses.
+**Resolution:** `HintContext.dict_access_pointers` records the memory
+address of each 3-cell (key, prev, new) entry at the time of the access.
+The prover propagates this into `CairoProof.dict_access_pointers`. The
+verifier builds an `address → (access_idx, cell)` map and scans
+`memory_table_data`; any entry at one of those addresses must match
+`dict_exec_data[access_idx][cell]` (already Merkle-committed). Any
+mismatch produces a `"dict bus link broken"` rejection.
 
-Unlike bitwise, dict-pointer base addresses are dynamic (wherever the
-program allocated them via `alloc_felt252_dict`). The verifier doesn't
-know them statically.
-
-**Fix plan:** Add a `dict_segments: Vec<(u32, u32)>` field to the proof
-capturing each dict-segment base address and length. The prover already
-tracks these in `HintContext.dicts`. The verifier then:
-1. Authenticates `dict_segments` via a fresh commitment mixed into FS.
-2. For each `(base, len)` and each memory_table entry at
-   `[base, base + len)`, looks up the corresponding dict_accesses entry
-   by pointer offset.
-3. Cross-checks the memory_table value against the committed
-   dict_exec_data / side-table at that access index.
-
-Estimated effort: ~200 lines (proof field + prover population + verifier scan).
+Negative test: `test_dict_bus_link_catches_unbacked_memory_entry`.
 
 ### R3. AIR M31 → Felt252 widening
 
