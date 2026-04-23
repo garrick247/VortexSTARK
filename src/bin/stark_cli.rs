@@ -382,11 +382,17 @@ fn cmd_prove_starknet(
     if let Some(json) = storage_json {
         match serde_json::from_str::<serde_json::Value>(json) {
             Ok(serde_json::Value::Object(map)) => {
+                use vortexstark::felt252::Felt252;
                 for (k, v) in &map {
-                    let key = parse_hex_u64(k.as_str());
-                    let val = v.as_str().map(parse_hex_u64)
-                        .or_else(|| v.as_u64())
-                        .unwrap_or(0);
+                    // Parse full Felt252 for both key and value; no u64 truncation.
+                    let key = Felt252::from_hex(k.as_str());
+                    let val = match v {
+                        serde_json::Value::String(s) => Felt252::from_hex(s),
+                        serde_json::Value::Number(n) => {
+                            if let Some(u) = n.as_u64() { Felt252::from_u64(u) } else { Felt252::ZERO }
+                        }
+                        _ => Felt252::ZERO,
+                    };
                     sc.storage.insert(key, val);
                 }
                 eprintln!("  storage:    {} entries", sc.storage.len());
@@ -442,8 +448,10 @@ fn cmd_prove_starknet(
     if !sc_out.events.is_empty() {
         eprintln!("  events emitted: {}", sc_out.events.len());
     }
-    if sc_out.storage.values().any(|&v| v != 0) {
-        let writes: Vec<_> = sc_out.storage.iter().filter(|(_, v)| **v != 0).collect();
+    if sc_out.storage.values().any(|v| v != &vortexstark::felt252::Felt252::ZERO) {
+        let writes: Vec<_> = sc_out.storage.iter()
+            .filter(|(_, v)| **v != vortexstark::felt252::Felt252::ZERO)
+            .collect();
         eprintln!("  storage writes: {}", writes.len());
     }
 

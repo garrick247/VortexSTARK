@@ -135,8 +135,12 @@ const MAX_CALL_DEPTH: usize = 8;
 /// emit_event, call_contract, deploy, send_message_to_l1) write into these
 /// fields so the caller can inspect them after proving.
 pub struct SyscallState {
-    /// Contract storage: storage_key (felt252 low-64) → value (felt252 low-64).
-    pub storage: HashMap<u64, u64>,
+    /// Contract storage: full felt252 → felt252. The u64 memory cells at the
+    /// syscall boundary are widened through `Felt252::from_u64` on write and
+    /// narrowed via `FeltExt::low_u64` on read, so values that happen to fit
+    /// in u64 round-trip bit-for-bit. Real Starknet values exceed u64 — the
+    /// HashMap preserves the high bits until hint-layer widening catches up.
+    pub storage: HashMap<crate::felt252::Felt252, crate::felt252::Felt252>,
     /// Events emitted by emit_event syscalls.
     pub events: Vec<SyscallEvent>,
     /// Records of call_contract / library_call syscalls (in order).
@@ -527,19 +531,27 @@ fn hint_system_call(
         sel::STORAGE_READ => {
             // Request:  [sel, gas, domain, key]
             // Response: [remaining_gas, err=0, value]
-            let key = memory.get(syscall_ptr + 3);
-            let value = ctx.syscall.storage.get(&key).copied().unwrap_or(0);
+            // Key and value are widened at the boundary: the u64 memory cell
+            // becomes a `Felt252` for the HashMap lookup, and the returned
+            // `Felt252` is narrowed via `low_u64` back into the memory cell.
+            // Round-trips bit-exact when values fit in u64; preserves high
+            // bits in the map otherwise.
+            use crate::felt252::{Felt252, FeltExt};
+            let key_u64 = memory.get(syscall_ptr + 3);
+            let key = Felt252::from_u64(key_u64);
+            let value = ctx.syscall.storage.get(&key).copied().unwrap_or(Felt252::ZERO);
             let remaining = charge_gas(gas_cost::STORAGE_READ, memory, ctx);
             memory.set(syscall_ptr + 4, remaining);
-            memory.set(syscall_ptr + 5, 0);     // error_code
-            memory.set(syscall_ptr + 6, value); // value
+            memory.set(syscall_ptr + 5, 0);                // error_code
+            memory.set(syscall_ptr + 6, value.low_u64());  // value (low 64 bits)
         }
 
         sel::STORAGE_WRITE => {
             // Request:  [sel, gas, domain, key, value]
             // Response: [remaining_gas, err=0]
-            let key   = memory.get(syscall_ptr + 3);
-            let value = memory.get(syscall_ptr + 4);
+            use crate::felt252::Felt252;
+            let key   = Felt252::from_u64(memory.get(syscall_ptr + 3));
+            let value = Felt252::from_u64(memory.get(syscall_ptr + 4));
             ctx.syscall.storage.insert(key, value);
             let remaining = charge_gas(gas_cost::STORAGE_WRITE, memory, ctx);
             memory.set(syscall_ptr + 5, remaining);
