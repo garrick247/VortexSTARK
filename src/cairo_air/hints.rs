@@ -248,6 +248,14 @@ pub struct HintContext {
     /// main execution trace, linking dict operations to the FRI-committed trace.
     pub dict_accesses: Vec<(usize, u64, u64, u64)>,
 
+    /// Parallel list of dict-pointer base addresses, one per
+    /// `dict_accesses` entry. Each entry's `dict_ptr` is the memory
+    /// address where the 3-cell (key, prev, new) entry lives. The
+    /// verifier scans `memory_table_data` for these pointers and
+    /// cross-checks the stored values against the side-table, closing
+    /// the dict memory bus link.
+    pub dict_access_pointers: Vec<u32>,
+
     /// Parallel full-precision log of dict accesses: `(step, key, prev, new)`
     /// as `Felt252`. Populated from `memory.get_felt` so values exceeding
     /// u64 retain their upper 188 bits. The u64 `dict_accesses` above is
@@ -316,6 +324,7 @@ impl HintContext {
             dict_arena_info: HashMap::new(),
             squash: SquashState::default(),
             dict_accesses: Vec::new(),
+            dict_access_pointers: Vec::new(),
             dict_accesses_felt: Vec::new(),
             execution_overflows: 0,
             syscall: SyscallState::default(),
@@ -1121,6 +1130,7 @@ fn hint_dict_entry_update(
             .copied()
             .unwrap_or_else(|| crate::felt252::Felt252::from_u64(prev_value));
         ctx.dict_accesses.push((step, key, prev_value, new_value));
+        ctx.dict_access_pointers.push(dict_ptr as u32);
         ctx.dict_accesses_felt.push((step, key_felt, prev_val_felt, new_val_felt));
         ctx.dicts.entry(base).or_default().insert(key, new_value);
         ctx.dicts_felt.entry(base).or_default().insert(key_felt, new_val_felt);

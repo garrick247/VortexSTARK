@@ -494,6 +494,14 @@ pub struct CairoProof {
     /// Verifier recomputes sorted Merkle root and checks ALL step-transition constraints C0-C3.
     pub dict_sorted_data: Vec<[u32; 4]>,
 
+    /// Dict-pointer base addresses, one per access in execution order.
+    /// `dict_access_pointers[i]` is the memory address where the
+    /// i-th dict entry's (key, prev, new) cells live. The verifier
+    /// scans `memory_table_data` for these pointers and cross-checks
+    /// against the side-table — the dict memory bus link.
+    #[serde(default)]
+    pub dict_access_pointers: Vec<u32>,
+
     // ---- Bitwise builtin (full-data, no sampling) ----
     //
     // When the Cairo program uses the memory-mapped bitwise builtin, the prover
@@ -776,10 +784,12 @@ fn cairo_prove_program_inner(
     // (x&y, x^y, x|y) natively from the Fiat-Shamir-bound (x, y) and
     // rejects any mismatch. No input-width restriction applies.
 
-    let proof = cairo_prove_cached_with_columns(
+    let dict_access_pointers = hint_ctx.dict_access_pointers.clone();
+    let mut proof = cairo_prove_cached_with_columns(
         &program.bytecode, columns, n, log_n, &cache, None,
         &hint_ctx.dict_accesses, &hint_ctx.dict_accesses_felt, bitwise_rows,
     );
+    proof.dict_access_pointers = dict_access_pointers;
     Ok((proof, hint_ctx))
 }
 
@@ -2884,6 +2894,11 @@ fn cairo_prove_cached_with_columns(
         dict_sorted_final_sum: dict_sorted_final_sum_opt,
         dict_exec_data: dict_exec_data_opt.unwrap_or_default(),
         dict_sorted_data: dict_sorted_data_opt.unwrap_or_default(),
+        // Populated by the outer cairo_prove_program_inner which has
+        // access to HintContext.dict_access_pointers. For paths that
+        // invoke the inner prover without hints (tests, benchmarks),
+        // this stays empty and the bus check is skipped.
+        dict_access_pointers: Vec::new(),
         bitwise_commitment: bitwise_commitment_opt,
         bitwise_rows,
         memory_table_commitment,
@@ -3247,6 +3262,48 @@ pub fn cairo_verify(proof: &CairoProof) -> Result<(), String> {
         }
     } else if proof.bitwise_commitment.is_some() {
         return Err("bitwise_commitment present but bitwise_rows is empty".into());
+    }
+
+    // Dict memory bus link: each dict access i in dict_access_pointers
+    // names the memory address of its 3-cell (key, prev, new) entry.
+    // The verifier scans memory_table_data and, for every entry whose
+    // address matches one of those pointers (or +1 / +2 offsets), it
+    // cross-checks the stored value against the corresponding row of
+    // dict_exec_data. This ties dict execution to actual memory writes
+    // on the main trace. Empty dict_access_pointers ⇒ no dicts used ⇒
+    // nothing to check.
+    if !proof.dict_access_pointers.is_empty() {
+        if proof.dict_access_pointers.len() != proof.dict_n_accesses {
+            return Err(format!(
+                "dict_access_pointers has {} entries but dict_n_accesses = {}",
+                proof.dict_access_pointers.len(), proof.dict_n_accesses));
+        }
+        // Build a lookup from memory address → (access_index, cell).
+        // cell 0 = key, cell 1 = prev, cell 2 = new.
+        let mut addr_to_access: std::collections::HashMap<u32, (usize, usize)> =
+            std::collections::HashMap::with_capacity(proof.dict_access_pointers.len() * 3);
+        for (i, &ptr) in proof.dict_access_pointers.iter().enumerate() {
+            addr_to_access.insert(ptr,     (i, 0));
+            addr_to_access.insert(ptr + 1, (i, 1));
+            addr_to_access.insert(ptr + 2, (i, 2));
+        }
+        for &[addr, val, _mult] in &proof.memory_table_data {
+            if let Some(&(access_idx, cell)) = addr_to_access.get(&addr) {
+                // dict_exec_data[access_idx] = [key_m31, prev_m31, new_m31].
+                // memory_table stores M31 values too. Compare directly.
+                if access_idx >= proof.dict_exec_data.len() {
+                    return Err(format!(
+                        "dict bus link: access_idx {access_idx} out of dict_exec_data range"));
+                }
+                let expected = proof.dict_exec_data[access_idx][cell];
+                if val != expected {
+                    return Err(format!(
+                        "dict bus link broken at addr {addr:#x} (access {access_idx}, cell {cell}): \
+                         memory_table value {val:#x} ≠ dict_exec_data value {expected:#x}"
+                    ));
+                }
+            }
+        }
     }
 
     // Bitwise memory bus link: every memory_table entry whose address
@@ -5584,6 +5641,39 @@ mod tests {
         let err = cairo_verify(&proof).expect_err("non-canonical limb must be rejected");
         assert!(err.contains("28-bit cap"),
             "error should name the limb violation, got: {err}");
+    }
+
+    #[test]
+    fn test_dict_bus_link_catches_unbacked_memory_entry() {
+        // Dict memory bus link: when dict_access_pointers is populated,
+        // every memory_table entry at one of those addresses (or +1/+2)
+        // must match the corresponding dict_exec_data row. Inject a
+        // bogus entry and verify rejection.
+        ffi::init_memory_pool();
+        let dict_accesses: Vec<(usize, u64, u64, u64)> = vec![
+            (0, 7, 0, 99),
+        ];
+        let mut proof = prove_with_dict(&dict_accesses);
+        cairo_verify(&proof).expect("unmodified proof must verify");
+
+        // Manually populate dict_access_pointers. Pick an address far
+        // from the padding/sentinel range so no collision.
+        let dict_ptr: u32 = 0x1000;
+        proof.dict_access_pointers = vec![dict_ptr];
+        // dict_exec_data[0] = [key, prev, new]. Inject a memory_table
+        // entry at dict_ptr+1 (prev cell) with the WRONG value.
+        let wrong_prev = proof.dict_exec_data[0][1].wrapping_add(17);
+        proof.memory_table_data.push([dict_ptr + 1, wrong_prev, 1]);
+        // Reseal memory_table_commitment.
+        let mem_flat: Vec<u32> = proof.memory_table_data.iter()
+            .flat_map(|&[a, v, m]| [a, v, m])
+            .chain(proof.memory_instr_data.iter().flat_map(|&[p, lo, hi, m]| [p, lo, hi, m]))
+            .collect();
+        proof.memory_table_commitment = crate::channel::hash_words(&mem_flat);
+
+        let err = cairo_verify(&proof).expect_err("dict bus mismatch must be rejected");
+        assert!(err.contains("dict bus link"),
+            "bus-link rejection should be explicit, got: {err}");
     }
 
     #[test]
