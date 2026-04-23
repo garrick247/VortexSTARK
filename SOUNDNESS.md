@@ -701,3 +701,102 @@ reasonable engineering security estimate pending formal proof.
 **Recommended action for external auditor:** Evaluate the Circle-FRI fold correctness in
 `src/fri.rs` and `cuda/fri.cu`, and assess whether the standard proximity gap conjecture
 arguments transfer without modification from the univariate to the circle-fold setting.
+
+---
+
+## Residual structural items and their fix plans
+
+Three gaps remain that are architecturally scoped beyond a single hardening
+commit. Each is documented with the concrete steps needed to close it so
+an auditor or next-session implementer can pick up the work directly.
+
+### R1. Initial register boundary constraint (T_PC[0] == initial_pc)
+
+**Status (2026-04-23):** `cairo_verify` recomputes `Blake2s(program)` and
+rejects any mismatch with `public_inputs.program_hash`. `verify_cairo_statement`
+additionally requires the caller's claimed `program_hash` match. However,
+no constraint in the FRI-proven polynomial ties `T_PC` at trace row 0 to
+`initial_pc` — a prover could in principle produce a valid proof whose
+trace starts at a different `PC` than `public_inputs.initial_pc` claims.
+
+In practice this is partially mitigated by the memory-table argument:
+the first instruction fetch goes to `memory[T_PC[0]]`, and memory[X] is
+authenticated against `memory_instr_data` which contains the real
+bytecode. So the row-0 PC must correspond to *some* address in the real
+bytecode, not an arbitrary value. But a program's bytecode may contain
+multiple valid entry points, allowing a prover to "claim" one entry
+while actually running another.
+
+**Fix plan:** Add a boundary constraint to the composition polynomial.
+```
+Q_boundary_pc(x) = (T_PC(x) - initial_pc) / (x - p_0)
+Q_boundary_ap(x) = (T_AP(x) - initial_ap) / (x - p_0)
+```
+where `p_0` is the first trace-domain point. `Q_boundary_*(x)` is a
+polynomial iff `T_PC(p_0) = initial_pc` (resp. `T_AP(p_0) = initial_ap`).
+Implementation:
+1. Add two challenge alphas for the new constraints (mixed from FS channel).
+2. Extend the GPU quotient kernel (`cuda/constraints.cu`) to evaluate
+   `Q_boundary_pc` and `Q_boundary_ap` at every eval-domain point and
+   add them to the composition polynomial with their alphas.
+3. Extend the verifier's OODS check to include the two new terms:
+   at the OODS point `z`, verify the composition includes
+   `alpha_bp * (T_PC_oods - initial_pc) / (z - p_0) + alpha_bap * (T_AP_oods - initial_ap) / (z - p_0)`.
+
+Estimated effort: ~150 lines (kernel + verifier OODS + FS mixing).
+
+### R2. Dict memory bus link
+
+**Status (2026-04-23):** The bitwise builtin has a full memory bus link
+(verifier scans `memory_table_data` for bitwise addresses and cross-checks
+against `bitwise_rows`). Dicts have the S_dict link to the main trace's
+`COL_DICT_KEY`/`COL_DICT_NEW` columns, the exec-log to side-table
+low-31-bit link, and the canonical-limb check — but no scan over
+`memory_table_data` for dict-pointer addresses.
+
+Unlike bitwise, dict-pointer base addresses are dynamic (wherever the
+program allocated them via `alloc_felt252_dict`). The verifier doesn't
+know them statically.
+
+**Fix plan:** Add a `dict_segments: Vec<(u32, u32)>` field to the proof
+capturing each dict-segment base address and length. The prover already
+tracks these in `HintContext.dicts`. The verifier then:
+1. Authenticates `dict_segments` via a fresh commitment mixed into FS.
+2. For each `(base, len)` and each memory_table entry at
+   `[base, base + len)`, looks up the corresponding dict_accesses entry
+   by pointer offset.
+3. Cross-checks the memory_table value against the committed
+   dict_exec_data / side-table at that access index.
+
+Estimated effort: ~200 lines (proof field + prover population + verifier scan).
+
+### R3. AIR M31 → Felt252 widening
+
+**Status (2026-04-23):** The Felt252 overlay preserves 252-bit precision
+for data flowing through memory (syscalls, dict keys/values), but the
+AIR itself is M31. Programs whose arithmetic operates over the full
+Stark field still fail with `ProveError::ExecutionRangeViolation`. This
+is the largest remaining limitation for full Starknet compatibility.
+
+**Fix plan:** Multi-limb trace representation.
+1. Each AIR-visible value widens from a single `u32` M31 column to 9 ×
+   28-bit M31 limbs (current `to_m31_limbs_9` layout).
+2. Every VM data column (`dst`, `op0`, `op1`, `res`, `dict_key`,
+   `dict_new`, memory values) widens from 1 column to 9 columns —
+   trace becomes ~306 columns instead of ~34.
+3. Every constraint involving these columns becomes a multi-limb
+   polynomial identity. Addition is straightforward (limb-by-limb
+   with carry). Multiplication is quadratic: `c_i = Σ_{j+k=i} a_j·b_k`
+   plus per-limb range checks that each output limb fits in 28 bits.
+4. The M31 range check sub-AIR extends to per-limb range checks.
+5. Memory-table addresses and values become 9-limb each; bus arguments
+   use the multi-limb encoding.
+
+This is a multi-week rewrite touching `prover.rs`, the constraint
+kernel, the memory-table sub-AIR, the trace generation, and the
+verifier. It is not session-sized and should be scoped as its own
+branch with a dedicated design review.
+
+Estimated effort: 2–4 weeks of focused work, new test suite for
+multi-limb arithmetic correctness, cross-validation against stwo's
+Cairo AIR (which has the same widening).
