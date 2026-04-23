@@ -88,18 +88,33 @@ impl<T> DeviceBuffer<T> {
 
     /// Upload from a pinned host buffer (faster DMA transfer).
     /// The caller must provide a pinned (page-locked) slice allocated via cudaMallocHost.
+    /// Transfers larger than CHUNK_BYTES are split so WSL2's GPU-PV driver does
+    /// not reject the whole transfer when it cannot stage it in one shot.
     /// SAFETY: `data` must point to pinned host memory.
     pub unsafe fn from_pinned(data: *const T, len: usize) -> Self {
+        const CHUNK_BYTES: usize = 512 * 1024 * 1024; // 512 MB
         let buf = Self::alloc(len);
         if len > 0 {
-            let bytes = len * std::mem::size_of::<T>();
-            let err = unsafe { ffi::cudaMemcpy(
-                buf.ptr as *mut c_void,
-                data as *const c_void,
-                bytes,
-                ffi::MEMCPY_H2D,
-            ) };
-            assert!(err == 0, "cudaMemcpy H2D (pinned) failed: error {err}");
+            let elem_size = std::mem::size_of::<T>();
+            let total_bytes = len * elem_size;
+            let chunk_elems = (CHUNK_BYTES / elem_size).max(1);
+            let mut offset = 0;
+            while offset < len {
+                let n = (len - offset).min(chunk_elems);
+                let err = unsafe {
+                    ffi::cudaMemcpy(
+                        buf.ptr.add(offset) as *mut c_void,
+                        data.add(offset) as *const c_void,
+                        n * elem_size,
+                        ffi::MEMCPY_H2D,
+                    )
+                };
+                assert!(
+                    err == 0,
+                    "cudaMemcpy H2D (pinned) failed: error {err} at offset={offset} bytes, chunk={n} elems, total={total_bytes} bytes"
+                );
+                offset += n;
+            }
         }
         buf
     }
