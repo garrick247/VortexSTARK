@@ -4649,6 +4649,33 @@ mod tests {
         assert!(result.is_ok(), "Cairo proof failed: {:?}", result);
     }
 
+    #[test]
+    fn test_verifier_recomputes_program_hash() {
+        // A prover who lies about program_hash (claiming one hash while
+        // public_inputs.program holds different bytecode) must be rejected.
+        ffi::init_memory_pool();
+        let program = build_fib_program(64);
+        let mut proof = cairo_prove(&program, 64, 6);
+        cairo_verify(&proof).expect("unmodified proof must verify");
+        // Flip one bit in the claimed program_hash — bytecode is intact.
+        proof.public_inputs.program_hash[0] ^= 1;
+        let err = cairo_verify(&proof).expect_err("hash mismatch must be rejected");
+        assert!(err.contains("program_hash") && err.contains("Blake2s"),
+            "error should name the recompute check, got: {err}");
+    }
+
+    #[test]
+    fn test_verifier_rejects_wrong_version() {
+        ffi::init_memory_pool();
+        let program = build_fib_program(64);
+        let mut proof = cairo_prove(&program, 64, 6);
+        cairo_verify(&proof).expect("unmodified proof must verify");
+        proof.version = CAIRO_PROOF_VERSION + 1;
+        let err = cairo_verify(&proof).expect_err("wrong version must be rejected");
+        assert!(err.contains("version"),
+            "error should mention version, got: {err}");
+    }
+
     /// Tamper with the PoW nonce and verify rejection.
     /// Also verify that the nonce actually satisfies the PoW check.
     #[test]
