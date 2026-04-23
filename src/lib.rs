@@ -11,6 +11,7 @@ pub mod poseidon;
 pub mod rpo_m31;
 pub mod poseidon2f;
 pub mod cairo_air;
+pub mod felt252;
 pub mod prover;
 pub mod verifier;
 pub mod oods;
