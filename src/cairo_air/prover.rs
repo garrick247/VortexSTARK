@@ -304,9 +304,21 @@ pub fn compute_program_hash(bytecode: &[u64]) -> [u32; 8] {
     out
 }
 
+/// Monotonic proof schema version. Bump on any breaking field change so
+/// old verifiers reject new proofs with a clear error instead of a serde
+/// deserialization mismatch. Version 2 adds the Phase 2 dict side-table +
+/// felt-overlay-aware dict accesses.
+pub const CAIRO_PROOF_VERSION: u32 = 2;
+
 /// Complete Cairo STARK proof.
 #[derive(Clone, serde::Serialize, serde::Deserialize)]
 pub struct CairoProof {
+    /// Schema version — must match [`CAIRO_PROOF_VERSION`] at verify time.
+    /// When absent from a serialized proof (e.g. pre-versioning archives),
+    /// `serde(default)` yields 0 and the verifier rejects with a clear
+    /// error.
+    #[serde(default)]
+    pub version: u32,
     pub log_trace_size: u32,
     /// Public inputs (verified by both prover and verifier)
     pub public_inputs: CairoPublicInputs,
@@ -2803,6 +2815,7 @@ fn cairo_prove_cached_with_columns(
     }
     phase_tag("phase5_pow_decommit");
     CairoProof {
+        version: CAIRO_PROOF_VERSION,
         log_trace_size: log_n,
         public_inputs,
         trace_commitment,
@@ -2882,6 +2895,27 @@ fn cairo_prove_cached_with_columns(
 
 /// Verify a Cairo STARK proof.
 pub fn cairo_verify(proof: &CairoProof) -> Result<(), String> {
+    if proof.version != CAIRO_PROOF_VERSION {
+        return Err(format!(
+            "proof version mismatch: proof has v{}, verifier expects v{} — \
+             re-prove with the current prover or use a matching verifier",
+            proof.version, CAIRO_PROOF_VERSION
+        ));
+    }
+    // Independently recompute program_hash from the bytecode carried in
+    // public_inputs and reject any mismatch. This closes the prior
+    // "caller's responsibility" gap — the verifier now binds the proof
+    // to the exact bytecode it claims to have run.
+    {
+        let recomputed = compute_program_hash(&proof.public_inputs.program);
+        if recomputed != proof.public_inputs.program_hash {
+            return Err(format!(
+                "program_hash mismatch: public_inputs.program_hash = {:?} \
+                 but Blake2s(public_inputs.program) = {:?}",
+                proof.public_inputs.program_hash, recomputed
+            ));
+        }
+    }
     let log_n = proof.log_trace_size;
     let log_eval_size = log_n + BLOWUP_BITS;
     let eval_size = 1usize << log_eval_size;
