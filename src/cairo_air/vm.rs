@@ -65,9 +65,22 @@ const BITWISE_PAGE_LEN: usize = BITWISE_MAX_INV * 5;
 /// via [`Memory::get_felt`] return the overlay entry if present, else
 /// `Felt252::from_u64(get(addr))`. The u64 layer is always
 /// authoritative for AIR / VM execution.
+/// Any address ≥ this threshold is routed to the sparse `high_data`
+/// HashMap instead of the contiguous `data: Vec<u64>`. This prevents a
+/// naive `set(0x4000_0000, x)` from allocating 8 GiB into `data`. All
+/// known builtin base addresses (`POSEIDON_BUILTIN_BASE = 0x4000_0000`,
+/// `PEDERSEN_BUILTIN_BASE = 0x5000_0000`, `BITWISE_BUILTIN_BASE =
+/// 0x6000_0000`) are above this threshold.
+pub const SPARSE_MEM_THRESHOLD: u64 = 0x1000_0000;
+
 #[derive(Clone)]
 pub struct Memory {
     data: Vec<u64>,
+    /// Sparse overlay for addresses ≥ SPARSE_MEM_THRESHOLD (outside the
+    /// bitwise page). Used for Pedersen (0x5000_0000) and Poseidon
+    /// (0x4000_0000) builtin memory pages, plus any other high-address
+    /// access pattern, without allocating gigabytes into `data`.
+    high_data: std::collections::HashMap<u64, u64>,
     /// Dedicated storage for BITWISE_MAX_INV × 5 cells (lazily allocated).
     bitwise: Vec<u64>,
     /// Per-invocation write flags: bit 0 = x written, bit 1 = y written.
@@ -82,16 +95,23 @@ impl Memory {
     pub fn new() -> Self {
         Self {
             data: Vec::new(),
+            high_data: std::collections::HashMap::new(),
             bitwise: Vec::new(),
             bitwise_flags: Vec::new(),
             felt_overlay: std::collections::HashMap::new(),
         }
     }
 
-    /// Create memory with pre-allocated capacity.
+    /// Create memory with pre-allocated capacity for the low-address
+    /// contiguous region. `size` is clamped to `SPARSE_MEM_THRESHOLD` so a
+    /// caller passing a builtin-page address (e.g. `0x5000_0000`) does
+    /// not accidentally allocate multi-gigabyte `data`. High addresses
+    /// are served from the sparse `high_data` overlay.
     pub fn with_capacity(size: usize) -> Self {
+        let clamped = size.min(SPARSE_MEM_THRESHOLD as usize);
         Self {
-            data: vec![0u64; size],
+            data: vec![0u64; clamped],
+            high_data: std::collections::HashMap::new(),
             bitwise: Vec::new(),
             bitwise_flags: Vec::new(),
             felt_overlay: std::collections::HashMap::new(),
@@ -115,6 +135,9 @@ impl Memory {
                 return self.bitwise[offset];
             }
             return 0;
+        }
+        if addr >= SPARSE_MEM_THRESHOLD {
+            return self.high_data.get(&addr).copied().unwrap_or(0);
         }
         let idx = addr as usize;
         if idx < self.data.len() { self.data[idx] } else { 0 }
@@ -146,6 +169,14 @@ impl Memory {
                         self.bitwise[b + 4] = (x | y) as u64;
                     }
                 }
+            }
+            return;
+        }
+        if addr >= SPARSE_MEM_THRESHOLD {
+            if val == 0 {
+                self.high_data.remove(&addr);
+            } else {
+                self.high_data.insert(addr, val);
             }
             return;
         }
@@ -844,6 +875,35 @@ pub fn step(state: &CairoState, memory: &mut Memory) -> CairoState {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn test_high_address_write_is_sparse() {
+        // Pedersen base (0x5000_0000) and Poseidon base (0x4000_0000)
+        // used to allocate multi-GB contiguous Vec storage. Now they
+        // route to the sparse high_data overlay. A Memory with small
+        // capacity must still handle writes at these addresses.
+        let mut mem = Memory::with_capacity(1024);
+        assert!(mem.data.len() <= SPARSE_MEM_THRESHOLD as usize);
+        // Pedersen base write — previously would have OOM'd.
+        mem.set(0x5000_0000, 42);
+        assert_eq!(mem.get(0x5000_0000), 42);
+        // Poseidon base.
+        mem.set(0x4000_0000, 1337);
+        assert_eq!(mem.get(0x4000_0000), 1337);
+        // Overwrite with 0 removes the entry (no unbounded growth).
+        mem.set(0x4000_0000, 0);
+        assert_eq!(mem.get(0x4000_0000), 0);
+        // Contiguous Vec remains modestly sized.
+        assert!(mem.data.len() <= 1024);
+    }
+
+    #[test]
+    fn test_with_capacity_clamps_to_sparse_threshold() {
+        // A caller asking for 10 GB of contiguous memory gets the
+        // sparse threshold instead — no multi-GB allocation.
+        let mem = Memory::with_capacity(0x5000_0000);
+        assert_eq!(mem.data.len(), SPARSE_MEM_THRESHOLD as usize);
+    }
 
     #[test]
     fn test_felt_overlay_preserves_high_bits() {

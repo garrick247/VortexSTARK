@@ -252,7 +252,19 @@ pub struct CairoStatement {
 /// verify_cairo_statement(&proof, &stmt).expect("proof should be valid");
 /// ```
 pub fn verify_cairo_statement(proof: &CairoProof, stmt: &CairoStatement) -> Result<(), String> {
+    // Bind the statement's program_hash to actual bytecode: verifier
+    // recomputes Blake2s(public_inputs.program) and requires it matches
+    // BOTH the stated hash and the proof's claimed hash. This prevents
+    // a prover from claiming any hash they want.
+    let recomputed = compute_program_hash(&proof.public_inputs.program);
     let pi = &proof.public_inputs;
+    if recomputed != pi.program_hash {
+        return Err(format!(
+            "program_hash/bytecode mismatch in proof: public_inputs.program_hash = {:?} \
+             but Blake2s(public_inputs.program) = {:?} — proof is internally inconsistent",
+            pi.program_hash, recomputed
+        ));
+    }
     if pi.program_hash != stmt.program_hash {
         return Err(format!(
             "program_hash mismatch: proof has {:?}, statement expects {:?}",
