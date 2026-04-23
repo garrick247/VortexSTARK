@@ -2088,22 +2088,28 @@ fn cairo_prove_cached_with_columns(
             .map(|src| (0..4).map(|k| DeviceBuffer::from_host(&src[k])).collect())
             .collect();
         let (interaction_evals_raw, interaction_evals_next_raw): ([[[u32; 4]; 4]; 3], [[[u32; 4]; 4]; 3]) = {
-            let mut raw_z    = [[[0u32; 4]; 4]; 3];
-            let mut raw_zn   = [[[0u32; 4]; 4]; 3];
-            // Reuse the already-GPU-resident d_interaction_eval buffers instead of
-            // uploading interact_cn from host again — saves 12 × eval_size × 4B H→D
-            // per OODS. (Previous code re-uploaded for INTT even though the canonic-order
-            // eval data was already on GPU in d_interaction_eval.)
+            // Stage 1: run all 12 GPU INTTs serially (they share the default stream),
+            // collect the coefficient vectors on host.
+            let mut all_coeffs: Vec<Vec<u32>> = Vec::with_capacity(12);
             for pi in 0..3 {
                 for k in 0..4 {
                     let mut d = d_interaction_eval[pi][k].clone_on_device();
                     ntt::interpolate_stwo(&mut d, &cache.stwo_eval_ntt);
-                    let coeffs = d.to_host();
+                    all_coeffs.push(d.to_host());
+                }
+            }
+            // Stage 2: parallel CPU eval_at_oods on all 12 × 2 point evaluations.
+            let pair_results: Vec<([u32; 4], [u32; 4])> =
+                all_coeffs.par_iter().map(|coeffs| {
                     let val_z  = eval_at_oods_from_coeffs(&coeffs[..n], z);
                     let val_zn = eval_at_oods_from_coeffs(&coeffs[..n], z_next);
-                    raw_z[pi][k]  = val_z.to_u32_array();
-                    raw_zn[pi][k] = val_zn.to_u32_array();
-                }
+                    (val_z.to_u32_array(), val_zn.to_u32_array())
+                }).collect();
+            let mut raw_z    = [[[0u32; 4]; 4]; 3];
+            let mut raw_zn   = [[[0u32; 4]; 4]; 3];
+            for (idx, (vz, vn)) in pair_results.into_iter().enumerate() {
+                raw_z[idx / 4][idx % 4]  = vz;
+                raw_zn[idx / 4][idx % 4] = vn;
             }
             (raw_z, raw_zn)
         };
