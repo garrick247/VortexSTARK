@@ -3004,6 +3004,38 @@ pub fn cairo_verify(proof: &CairoProof) -> Result<(), String> {
                 proof.dict_link_final, exec_key_new_sum.to_u32_array()
             ));
         }
+
+        // Phase 2: side-table ↔ exec-log link. Row j of `dict_side_table` encodes
+        // the full Felt252 (key, prev, new) in 9 × 28-bit limbs; row j of
+        // `dict_exec_data` stores the same values reduced mod 2^31 (low 31 bits
+        // of the u64). If the side-table were unlinked, a prover could commit
+        // arbitrary high limbs without detection. This check extracts the low
+        // 31 bits from the side-table limbs — bits 0..28 from limb[0] plus
+        // bits 28..31 from limb[1] — and asserts equality with the exec log,
+        // proving the side-table's low portion is bound to the main trace.
+        if !proof.dict_side_table.is_empty() {
+            if proof.dict_side_table.len() != n_acc {
+                return Err(format!(
+                    "dict_side_table has {} rows but {} accesses were recorded",
+                    proof.dict_side_table.len(), n_acc));
+            }
+            for j in 0..n_acc {
+                let row = &proof.dict_side_table[j];
+                // Row layout: [ptr, key[0..9], prev[0..9], new[0..9]].
+                let key_low31  = (row[1]  & ((1u32 << 28) - 1)) | ((row[2]  & 0x7) << 28);
+                let prev_low31 = (row[10] & ((1u32 << 28) - 1)) | ((row[11] & 0x7) << 28);
+                let new_low31  = (row[19] & ((1u32 << 28) - 1)) | ((row[20] & 0x7) << 28);
+                let exec = &proof.dict_exec_data[j];
+                if key_low31 != exec[0] || prev_low31 != exec[1] || new_low31 != exec[2] {
+                    return Err(format!(
+                        "dict_side_table row {j} low-31 bits ({:#x}, {:#x}, {:#x}) \
+                         do not match dict_exec_data ({:#x}, {:#x}, {:#x}) \
+                         — side-table not bound to execution log",
+                        key_low31, prev_low31, new_low31,
+                        exec[0], exec[1], exec[2]));
+                }
+            }
+        }
     }
 
     // Bind both EC trace commitments (lo/hi split) into Fiat-Shamir.
@@ -5443,6 +5475,37 @@ mod tests {
         proof.dict_exec_data[n_acc] = [1, 2, 3];
         let result = cairo_verify(&proof);
         assert!(result.is_err(), "tampered padding row must be rejected");
+    }
+
+    #[test]
+    fn test_dict_side_table_tampered_low_limb_rejected() {
+        // Composition check: the side-table commitment is mixed into the
+        // Fiat-Shamir channel before z_dict_link is drawn. Recomputing the
+        // commitment after tampering shifts the verifier's challenges, so
+        // the subsequent S_dict link check (which recomputes exec_key_new_sum
+        // from dict_exec_data under the shifted challenge) catches any
+        // side-table mutation. Together with the per-row low-31-bit link
+        // check (direct binding when exec_data is present), this covers both
+        // channel-detected and structurally-detected cases.
+        ffi::init_memory_pool();
+        let dict_accesses: Vec<(usize, u64, u64, u64)> = vec![
+            (0, 1, 0, 42), (1, 2, 0, 99),
+        ];
+        let mut proof = prove_with_dict(&dict_accesses);
+        cairo_verify(&proof).expect("unmodified proof must verify");
+        assert!(!proof.dict_side_table.is_empty(),
+            "test requires non-empty side table");
+
+        // Flip a bit in key limb[0] (within the 28-bit cap).
+        proof.dict_side_table[0][1] ^= 1;
+        // Recompute commitment so the hash-match check passes.
+        let flat: Vec<u32> = proof.dict_side_table.iter()
+            .flat_map(|r| r.iter().copied())
+            .collect();
+        proof.dict_side_table_commitment = crate::channel::hash_words(&flat);
+
+        assert!(cairo_verify(&proof).is_err(),
+            "tampered side-table row must be rejected by one of the link checks");
     }
 
     #[test]
