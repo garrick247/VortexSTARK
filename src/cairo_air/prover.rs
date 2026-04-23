@@ -823,6 +823,24 @@ fn cairo_prove_cached_with_columns(
     dict_accesses: &[(usize, u64, u64, u64)],
     bitwise_rows: Vec<[u32; 5]>,
 ) -> CairoProof {
+    // Phase-level wall-clock tracing, gated by env var so default builds stay quiet.
+    // Set VORTEXSTARK_PROFILE=1 to emit one line per major phase to stderr. Uses
+    // wall-clock (sync CPU timing) — each phase must await the GPU before returning
+    // for numbers to be meaningful, which is already the case at phase boundaries.
+    let profile = std::env::var_os("VORTEXSTARK_PROFILE").is_some();
+    let phase_start = std::time::Instant::now();
+    let mut phase_last = phase_start;
+    let mut phase_tag = |label: &str| {
+        if profile {
+            let now = std::time::Instant::now();
+            eprintln!(
+                "  [perf] {label:<28} {:>7.1}ms  (cum {:>7.1}ms)",
+                now.duration_since(phase_last).as_secs_f64() * 1000.0,
+                now.duration_since(phase_start).as_secs_f64() * 1000.0,
+            );
+            phase_last = now;
+        }
+    };
     let n = 1usize << log_n;
     // n_steps MUST equal n exactly. Callers are responsible for padding:
     // cairo_prove_program_inner passes n (not n_steps) after installing the self-loop pad.
@@ -872,6 +890,8 @@ fn cairo_prove_cached_with_columns(
         program: program.to_vec(),
     };
 
+    phase_tag("setup+public_inputs");
+
     // ---- Phase 1: Trace generation + commitment ----
     // (31 base columns already computed by caller; extend with dict linkage columns here)
 
@@ -905,6 +925,8 @@ fn cairo_prove_cached_with_columns(
     // Extract range check offsets from raw trace before NTT destroys it.
     // This is O(n_steps) bit manipulation — fast even at log_n=26.
     let (rc_offsets, rc_counts) = extract_offsets(&columns, n_steps);
+
+    phase_tag("phase1_trace_extend");
 
     // ---- Group-batched NTT + ZK Blinding + Commit ────────────────────────
     //
@@ -1082,6 +1104,8 @@ fn cairo_prove_cached_with_columns(
     // after this point without invalidating z_dict and breaking all subsequent checks.
     channel.mix_digest(&dict_trace_commitment);
 
+    phase_tag("ntt_blind_commit");
+
     // ---- S_dict step-transition interaction trace (GAP-1 closure) ────────────
     // Draw z_dict_link, alpha_dict_link AFTER dict_trace_commitment is committed.
     // This binds the main trace's dict columns before any challenges are derived
@@ -1139,6 +1163,8 @@ fn cairo_prove_cached_with_columns(
         0, 0, 0, 0,
     ]);
 
+    phase_tag("sdict_interaction");
+
     // ---- EC trace for Pedersen (optional) ----
     // EC_TRACE_LO: split point matching GPU leaf hash cap (16 columns per tree).
     // EC trace has 29 columns; lo = 0..16, hi = 16..29.
@@ -1188,6 +1214,8 @@ fn cairo_prove_cached_with_columns(
     } else {
         (None, None, None, None)
     };
+
+    phase_tag("ec_trace");
 
     // ---- Dict consistency sub-AIR (GAP-1 — STARK-level) ----
     // Build exec and sorted dict data traces, commit both as Merkle polynomial
@@ -1299,6 +1327,8 @@ fn cairo_prove_cached_with_columns(
     } else {
         (None, None, None, None, None, None, None)
     };
+
+    phase_tag("dict_sub_air");
 
     // ---- Phase 2: Fused LogUp interaction ----
     let z_mem = channel.draw_felt();
@@ -1599,6 +1629,8 @@ fn cairo_prove_cached_with_columns(
         rc_final_sum[0], rc_final_sum[1], rc_final_sum[2], rc_final_sum[3],
     ]);
 
+    phase_tag("phase2_logup_rc");
+
     // ---- Bitwise builtin commitment (full-data, bound into Fiat-Shamir) ----
     // Hash all bitwise rows into the channel BEFORE constraint alphas and FRI challenges
     // are drawn.  This prevents a malicious prover from choosing bitwise data after
@@ -1614,6 +1646,8 @@ fn cairo_prove_cached_with_columns(
     } else {
         None
     };
+
+    phase_tag("bitwise_commit");
 
     // ---- Memory table commitment (closes LogUp soundness gap) ----
     // Serialize memory table as flat u32 array, hash it, and mix into Fiat-Shamir.
@@ -1632,10 +1666,14 @@ fn cairo_prove_cached_with_columns(
     let memory_table_commitment = crate::channel::hash_words(&mem_flat);
     channel.mix_digest(&memory_table_commitment);
 
+    phase_tag("mem_table_commit");
+
     // ---- RC counts commitment (closes RC soundness gap) ----
     let rc_counts_data: Vec<u32> = rc_counts.to_vec();
     let rc_counts_commitment = crate::channel::hash_words(&rc_counts_data);
     channel.mix_digest(&rc_counts_commitment);
+
+    phase_tag("rc_counts_commit");
 
     // ---- Phase 3: Quotient ----
     let constraint_alphas: Vec<QM31> = (0..N_CONSTRAINTS).map(|_| channel.draw_felt()).collect();
@@ -1979,6 +2017,8 @@ fn cairo_prove_cached_with_columns(
     };
     channel.mix_digest(&quotient_commitment);
 
+    phase_tag("phase3_quotient");
+
     // ---- OODS: Out-Of-Domain Sampling (stwo wire format) ----
     // Phase 1: evaluate trace at z and z_next; mix into channel.
     // Phase 2: evaluate AIR quotient at z; draw OODS alpha; compute OODS quotient for FRI.
@@ -2289,6 +2329,8 @@ fn cairo_prove_cached_with_columns(
         (z_arr, at_z_arr, at_next_arr, oods_q_arr, alpha_arr, oods_col, interaction_evals_raw, interaction_evals_next_raw)
     };
 
+    phase_tag("oods");
+
     // ---- Phase 4: FRI on OODS quotient (replaces direct AIR quotient FRI) ----
     // The AIR quotient q0..q3 has been sampled at z (oods_quotient_at_z) and
     // the OODS quotient polynomial is the FRI input.
@@ -2446,6 +2488,8 @@ fn cairo_prove_cached_with_columns(
             .find(|(_, v)| **v != QM31::ZERO).map(|(i, _)| i).unwrap_or(0);
         eprintln!("[DEGREE CHECK] {nonzero_count}/{last_n} non-zero IFFT coefficients, last at index {last_nonzero}");
     }
+
+    phase_tag("phase4_fri");
 
     // ---- Phase 5: Proof-of-Work grinding + Query + decommitment ----
     channel.mix_felts(&fri_last_layer_coeffs);
@@ -2672,6 +2716,7 @@ fn cairo_prove_cached_with_columns(
         fri_decommitments.push(decom);
         folded_indices = folded_indices.iter().map(|&i| i / 2).collect();
     }
+    phase_tag("phase5_pow_decommit");
     CairoProof {
         log_trace_size: log_n,
         public_inputs,
