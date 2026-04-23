@@ -2933,6 +2933,23 @@ pub fn cairo_verify(proof: &CairoProof) -> Result<(), String> {
     // the prover used. Empty side table ⇒ no mix, matching pre-Phase-2
     // prover behavior.
     if !proof.dict_side_table.is_empty() {
+        // Canonical encoding check: each limb must fit in 28 bits so that
+        // `from_m31_limbs_9` reassembles the value without silent masking.
+        // Row layout: [ptr, key_limbs[0..9], prev_limbs[0..9], new_limbs[0..9]].
+        // The pointer at row[0] is the access index (row number), not an
+        // M31 limb, so it is unconstrained.
+        const LIMB_MAX: u32 = 1u32 << 28;
+        for (i, row) in proof.dict_side_table.iter().enumerate() {
+            for j in 1..28 {
+                if row[j] >= LIMB_MAX {
+                    return Err(format!(
+                        "dict_side_table row {i} limb {j} = 0x{:x} \
+                         exceeds 28-bit cap (non-canonical Felt252 encoding)",
+                        row[j],
+                    ));
+                }
+            }
+        }
         let flat: Vec<u32> = proof.dict_side_table.iter()
             .flat_map(|r| r.iter().copied())
             .collect();
@@ -5426,6 +5443,34 @@ mod tests {
         proof.dict_exec_data[n_acc] = [1, 2, 3];
         let result = cairo_verify(&proof);
         assert!(result.is_err(), "tampered padding row must be rejected");
+    }
+
+    #[test]
+    fn test_dict_side_table_noncanonical_limb_rejected() {
+        // A side-table row with a limb ≥ 2^28 is a non-canonical Felt252
+        // encoding. Even if the prover re-hashes that garbage to produce a
+        // matching commitment, the verifier's 28-bit limb check must reject.
+        ffi::init_memory_pool();
+        let dict_accesses: Vec<(usize, u64, u64, u64)> = vec![
+            (0, 1, 0, 42), (1, 2, 0, 99),
+        ];
+        let mut proof = prove_with_dict(&dict_accesses);
+        cairo_verify(&proof).expect("unmodified dict proof must verify");
+        assert!(!proof.dict_side_table.is_empty(),
+            "test requires non-empty side table");
+
+        // Corrupt limb 1 of row 0 to a non-canonical value (2^29).
+        proof.dict_side_table[0][1] = 1u32 << 29;
+        // Recompute the commitment so the hash check passes and we hit
+        // the canonical-encoding check.
+        let flat: Vec<u32> = proof.dict_side_table.iter()
+            .flat_map(|r| r.iter().copied())
+            .collect();
+        proof.dict_side_table_commitment = crate::channel::hash_words(&flat);
+
+        let err = cairo_verify(&proof).expect_err("non-canonical limb must be rejected");
+        assert!(err.contains("28-bit cap"),
+            "error should name the limb violation, got: {err}");
     }
 
     #[test]
