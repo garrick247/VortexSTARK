@@ -1,28 +1,24 @@
 # VortexSTARK Cairo Prove — Performance Roadmap
 
-Status: **measurement, not plan**. Numbers are real, prioritization is mine.
+Status: **shipped — most of the projected speedup from the original baseline
+landed in this branch.** This document tracks the measured before/after plus
+remaining work.
 
-## Measured (2026-04-22, BigDaddy WSL2 / RTX 5090 / clean GPU)
+## Headline
 
-Phase timings via `VORTEXSTARK_PROFILE=1 stark_cli prove-file fibonacci.casm --log-n <N>`.
-All measurements at `BLOWUP_BITS=2` (production default, 160-bit security).
+At log_n=22 (fibonacci.casm padded to 2^22 rows, 24-core Intel 285K, RTX 5090):
 
-### log_n=20 — 8.9s prove, 2^20 trace rows
+| Version | Prove time | Δ from baseline |
+|---------|-----------:|---:|
+| Baseline (`9b365f2`) | 45.7s | — |
+| After 15 perf commits (`147dd7f`) | **13.25s** | **−71.0%** |
 
-| Phase                  | Time     | %      |
-|------------------------|---------:|-------:|
-| oods                   | 2808.6ms | 31.5%  |
-| ntt_blind_commit       | 2548.5ms | 28.6%  |
-| phase2_logup_rc        | 1788.5ms | 20.1%  |
-| phase3_quotient        |  794.6ms |  8.9%  |
-| phase4_fri             |  388.8ms |  4.4%  |
-| phase5_pow_decommit    |  234.5ms |  2.6%  |
-| sdict_interaction      |  189.1ms |  2.1%  |
-| setup + all others     |   <1ms   |  <1%   |
+Proof size and program hash unchanged modulo ZK blinding randomness.
+All tamper tests pass. Proof verifies OK.
 
-**Top-3 = 80.2% of prove time.**
+## Phase Breakdown
 
-### log_n=22 — 45.7s prove, 2^22 trace rows
+### Baseline (log_n=22, pre-optimization)
 
 | Phase                  | Time      | %      |
 |------------------------|----------:|-------:|
@@ -34,133 +30,97 @@ All measurements at `BLOWUP_BITS=2` (production default, 160-bit security).
 | sdict_interaction      |  1512.7ms |  3.3%  |
 | phase5_pow_decommit    |   905.1ms |  2.0%  |
 
-**Top-3 = 81.8% of prove time.**
+### After (log_n=22, same binary)
 
-### log_n≥24 — not measured this session
+| Phase                  | Before     | After     | Δ       |
+|------------------------|-----------:|----------:|--------:|
+| ntt_blind_commit       | 15107.2ms  |  3831.1ms | −74.6%  |
+| oods                   | 11172.4ms  |  2887.8ms | −74.2%  |
+| phase2_logup_rc        | 11149.7ms  |  3398.2ms | −69.5%  |
+| phase3_quotient        |  3615.5ms  |   854.9ms | −76.4%  |
+| phase4_fri             |  1554.2ms  |   288.3ms | −81.5%  |
+| sdict_interaction      |  1512.7ms  |   480.1ms | −68.3%  |
+| phase5_pow_decommit    |   905.1ms  |   804.6ms | −11.1%  |
+| **Total**              | **45736.8ms** | **13250.4ms** | **−71.0%** |
 
-WSL2 hit `Wsl/Service/E_UNEXPECTED` catastrophic-failure on multiple attempts.
-Symptom: GPU allocation or CUDA-runtime crash propagates to WSL host and kills
-the VM. Not reproduced on native Linux / stark_cli Fibonacci (which uses a
-different prove path). Treat as a WSL-environment issue to investigate
-separately — likely related to the Cairo prover's peak-memory footprint at
-log_n≥24 interacting with WSL2 GPU-PV limits.
+Every phase got faster; no phase was left untouched.
 
-## Scaling Behavior
+## What Landed (15 commits, in order)
 
-8.9s (log_n=20) → 45.7s (log_n=22) = **5.1×** for 4× data. Roughly `n log n`.
+1. **`f27c45a`** — Avoid D→H→D round-trip in 3 NTT commit groups. `ntt_blind_commit` −9.4%.
+2. **`57591b1`** — Same pattern in sdict/logup/rc/commit_qm31. `sdict` −15%.
+3. **`3cb11d2`** — GPU permute kernel (`cuda_permute_hc_to_canonic_brt`) for quotient commit. `phase3_quotient` −17.7%.
+4. **`cab9bd8`** — Reuse GPU interaction buffers for OODS, delete dead `srcs_hc`. `oods` −11.5%.
+5. **`2286603`** — rayon parallelize T1/T2/T3 + U1/U2 logup/RC CPU loops. `phase2_logup_rc` −11.6%.
+6. **`a97a875`** — rayon parallelize N_COLS trace-column OODS evaluation. `oods` −38.7%.
+7. **`dd67c53`** — rayon parallelize OODS Phase 1.5 interaction-poly evals. `oods` −19.5%.
+8. **`302b696`** — rayon parallelize canonic-BRT→hc-natural permute (3 commit groups, 34 cols). `ntt_blind_commit` −50.2%.
+9. **`5644cf2`** — rayon parallelize the 4-column permute sites (sdict/logup/rc/commit_qm31). `phase2_logup_rc` −51.7%, `sdict_interaction` −55.8%.
+10. **`3a208d4`** — GPU permute in `ntt_col_save` + `stwo_ntt_lde` helpers. `phase2_logup_rc` −21.9%.
+11. **`1a4ef10`** — rayon parallelize `vh_inv` + `trans_factor` eval-domain precomputes. `phase3_quotient` −64.7%.
+12. **`a1fa5ca`** — rayon parallelize `d_zh`, quotient numerator, domain-point precomputes. `ntt_blind_commit` −41.4%, `oods` −32.1%.
+13. **`6fafe6b`** — rayon parallelize FRI circle-fold twiddle precompute. `phase4_fri` −80.9%.
+14. **`9cda8c9`** — rayon parallel gather in `extract_memory_table`. `total` −3.1%.
+15. **`147dd7f`** — keep trace hc-natural buffers GPU-resident from commit to quotient (`cuda_permute_canonic_brt_to_hc_natural`). `phase3_quotient` −17.7%.
 
-Extrapolating naively to log_n=26 (64× the data of log_n=20) predicts ~700s,
-but the README cites **169s** at that size. Real prove time scales sub-linearly
-in practice because GPU parallelism hides constant-factor work as the batch
-grows. The top-3 phases continue to dominate — their proportions stay within
-a few percentage points across the measured sizes.
+## Pattern: what actually moved the needle
 
-**Expected top-3 at log_n=26:** three phases each in the 30–50s range, totaling
-~130–140s of the 169s budget. Everything else combined is ~30s.
+The optimizations that shipped fall into three classes:
 
-## Optimization Targets by Phase
+1. **Parallelize the big CPU loops.** The prover had many
+   `for i in 0..eval_size` sequential loops building domain-point lookups,
+   running per-row QM31 arithmetic, or gathering data for Merkle commits.
+   At eval_size = 2^24+ these are 100s of ms of single-threaded work while
+   the GPU idles. rayon par_iter + computing each index independently
+   (via `coset.at(i)` instead of `pt = pt.mul(step)`) scales linearly to
+   the 24 available cores. **This was the dominant win.**
 
-### 1. `oods` — 24–31% of total
+2. **Stop round-tripping through host.** Many commit/INTT paths downloaded
+   GPU data to host, permuted on CPU, re-uploaded. Replaced with a GPU
+   permute kernel (`cuda_permute_hc_to_canonic_brt` + inverse) and
+   kept committed data GPU-resident when possible.
 
-Out-of-domain sampling currently involves:
-- Evaluating every trace column at the OODS point `z` and `z_next` via INTT + circle fold
-- Computing AIR quotient values at `z` (4 quotient columns × INTT + fold)
-- Accumulating OODS-quotient numerators over ~50 columns with alpha weighting
-- Two rounds of `mix_felts` (at `z`, at `z_next`)
+3. **Kill dead code.** One N_COLS×eval_size CPU permute result was
+   computed but never read. Deleted.
 
-**Low-hanging fruit:**
-- [ ] **Fuse INTT + point-evaluation into a single kernel.** The per-column INTT
-      emits a full polynomial; we only need one evaluation point. Barycentric
-      evaluation on the eval-domain samples avoids the INTT entirely and runs in
-      O(n) GPU work per column with high parallelism. Rough win: 30–50% of
-      `oods`.
-- [ ] **Batch the column scans.** We currently loop per column with per-column
-      cudaMalloc/free cycles. Batch all 50+ columns in one kernel launch with
-      shared-memory tiling.
+## What's NOT done
 
-**Bigger lift:**
-- [ ] Move to stwo's `quotients_on_line_coset` accumulator — a single kernel
-      that produces all OODS quotient components without materializing per-column
-      intermediate polynomials.
+These are still on the table for further speedup, but in each case the
+implementation is genuinely new kernel/algorithm work — not a one-line fuse:
 
-### 2. `ntt_blind_commit` — 29–33% of total
+- **Fuse OODS INTT + barycentric eval.** We still INTT 12 interaction
+  polys + 34 trace polys on GPU, then evaluate on CPU. A
+  one-kernel barycentric evaluator (existing dormant kernel in
+  `cuda/barycentric_eval.cu` is too limited — needs rework for n > 64).
+  Projected remaining win: ~30–50% of the remaining `oods` phase.
+- **Replace LogUp with GrandProduct.** Protocol-level change, 2–3× win
+  on wide traces per stwo upstream.
+- **Radix-64 NTT using SM_120 shuffle primitives.** Current radix-4
+  kernel leaves SM utilization on the table for very large log_n.
+- **Proof aggregation.** To hit Starknet block cadence (~5s), per-block
+  prove can't keep up at a single log_n=26 proof. Aggregating many small
+  proofs is the architectural path there, not just kernel tuning.
 
-This phase does:
-- Group-batched forward NTT over all committed trace columns (34 cols + 3 dict + 12 interaction ≈ 50)
-- Per-column `r · Z_H(x)` ZK blinding addition
-- Merkle tree construction (Blake2s leaves grouped by `log_size`)
+## Scaling Notes
 
-**Low-hanging fruit:**
-- [ ] **Fuse blinding into NTT kernel.** Currently NTT writes eval-domain
-      column, then a second kernel adds `r · Z_H`. Fold the blinding into the
-      NTT post-butterfly stage — zero extra round-trips to HBM. Rough win:
-      10–15% of `ntt_blind_commit`.
-- [ ] **Reuse twiddle cache across the three NTT batches** (Group A, B, C).
-      Already done for the eval twiddles; verify the INTT twiddles are shared.
+log_n=22 went from 45.7s to 13.25s (−71%). The relative cost of each
+remaining phase is now much flatter — no single phase owns >30% of the
+prove. Future optimization needs to attack several simultaneously, or
+move to the architectural items above.
 
-**Bigger lift:**
-- [ ] **Switch to radix-64 NTT** using SM_120's shuffle primitives. The current
-      radix-4 kernel leaves half the SM utilization on the table for very large
-      `log_n`. Rough win: 20–30% at log_n≥24.
+**log_n=24, 26 not re-measured this session.** WSL2 kernel 6.6 + Cairo
+prove at that size still crashes the VM (documented in `WSL_SETUP.md`).
+The perf wins should scale proportionally — most are eval_size-denominated
+parallelism — so log_n=26 should drop from ~169s to somewhere in the
+~50–60s range. Needs a clean-WSL measurement to confirm.
 
-### 3. `phase2_logup_rc` — 20–24% of total
-
-LogUp interaction (memory argument) + range-check table construction:
-- Per-column fraction arithmetic over QM31 (mul, inverse)
-- Batch modular inverse via Montgomery batch-inverse
-- Parallel prefix sum for cancellation
-- Commit of three interaction trees (t1/t2/t3 for LogUp, u1/u2 for RC)
-
-**Low-hanging fruit:**
-- [ ] **Merge prefix-sum + inverse into a single kernel.** Today: batch inverse
-      kernel → prefix-sum kernel → per-row combine kernel. All three touch the
-      same data and can be fused. Rough win: 15–25% of `phase2_logup_rc`.
-- [ ] **Precompute the range-check multiplicity table more aggressively.**
-      `rc_counts` is computed CPU-side today for some paths; move to GPU.
-
-**Bigger lift:**
-- [ ] **Replace LogUp with Plonky3-style GrandProduct** for the memory
-      argument — stwo's recent work shows 2–3× wins for wide traces. Requires
-      constraint-level rework and verifier changes.
-
-## What 2–3× Gets You vs. Block Cadence
-
-Starknet mainnet block cadence is ~5s. Current Cairo prove at log_n=26 is
-~169s. **Delta: 34×.**
-
-Ceiling of each path:
-- Top-3 optimization pass (everything above): 2–3× total speedup → ~60–80s
-- Algorithmic swap (GrandProduct + barycentric OODS + fused kernels): another
-  2–3× → ~20–30s
-- Plus broader architectural wins (dynamic batching of multiple small blocks,
-  partial recursion to aggregate proofs, different field choice): another
-  2–3× → 8–12s
-
-**Realistic end state after 2 quarters of focused perf work with 1 engineer:**
-~20–30s prove at log_n=26 — **inside an order of magnitude of block cadence**,
-not at it. To actually hit 5s, you need one of:
-- Larger GPU or multi-GPU proving
-- Proof aggregation so a single proof covers many blocks, amortizing prove
-  cost (e.g., a 20-block bundle proved in 30s = 1.5s per block effective)
-- Moving to a different proving protocol (Plonky3 with FRI-Binius, Boojum, etc.)
-
-## Prioritization for Next Session
-
-If the goal is **"make Cairo prove 2× faster this week":**
-1. Fuse OODS INTT + point-evaluation (biggest single win)
-2. Fuse NTT + blinding
-3. Fuse LogUp prefix-sum + inverse
-
-If the goal is **"match StarkWare's prover":**
-- Forget incremental fuses — plan the proof-aggregation path + multi-GPU
-  scaling directly.
-
-## How to Reproduce
+## How to reproduce
 
 ```bash
 cargo build --release --bin stark_cli
 VORTEXSTARK_PROFILE=1 ./target/release/stark_cli prove-file \
     tests/fixtures/fibonacci.casm --log-n 22 -o /tmp/out.bin
+./target/release/stark_cli verify /tmp/out.bin
 ```
 
-Data in this file reflects `9b365f2 .. f0933ce` main-branch code.
+Data in this file reflects `9b365f2 .. 147dd7f` on `main`.

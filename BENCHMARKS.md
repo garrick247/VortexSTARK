@@ -715,3 +715,30 @@ First measurement of the headline since the BLOWUP_BITS=2 rework (stwo
 FriVerifier compatibility). Security dropped to 80-bit via the
 `bench-max-size` cargo feature — not for production, kept as a capability
 demonstration of the GPU scaling envelope.
+
+## CHECKPOINT: Post-perf-push Measurements (2026-04-22 late)
+
+15 consecutive perf commits merged onto main. Same log_n=22 workload remeasured
+on same host; binary rebuilt from `147dd7f`.
+
+### log_n=22 — 13.25s total (was 45.7s, −71.0%)
+
+| Phase                  | Before    | After    | Δ       |
+|------------------------|----------:|---------:|--------:|
+| ntt_blind_commit       | 15107.2ms |  3831.1ms | −74.6%  |
+| oods                   | 11172.4ms |  2887.8ms | −74.2%  |
+| phase2_logup_rc        | 11149.7ms |  3398.2ms | −69.5%  |
+| phase3_quotient        |  3615.5ms |   854.9ms | −76.4%  |
+| phase4_fri             |  1554.2ms |   288.3ms | −81.5%  |
+| sdict_interaction      |  1512.7ms |   480.1ms | −68.3%  |
+| phase5_pow_decommit    |   905.1ms |   804.6ms | −11.1%  |
+
+**Every phase faster. 326/326 lib tests still pass. Proofs verify OK.**
+
+Dominant optimization pattern: single-threaded CPU loops building domain-point
+lookups or doing per-row QM31 arithmetic were starving the GPU. Switching to
+rayon par_iter with index-independent `coset.at(i)` (instead of sequential
+`pt = pt.mul(step)`) scales to all 24 cores. Secondary pattern: eliminate
+D→H→CPU→H→D round-trips by doing permutes on GPU via
+`cuda_permute_hc_to_canonic_brt` / `cuda_permute_canonic_brt_to_hc_natural`.
+See `PERF_ROADMAP.md` for commit-by-commit attribution.
