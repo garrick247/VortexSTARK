@@ -227,17 +227,22 @@ pub fn public_claim_prefix_bytes(public_data: &[u32], outputs: &[u32], program: 
 }
 
 /// Compress a byte stream with zstd level 3 — matches
-/// `privacy_prove::compress_proof`. **NOT YET IMPLEMENTED.**
+/// `privacy_prove::compress_proof`.
 ///
-/// VortexSTARK vendors all dependencies (see `.cargo/config.toml` →
-/// `vendored-sources`). Pulling in `zstd` drags `libzstd-sys` plus a C
-/// build chain into `vendor/`, which is a separate piece of work from
-/// the wire-format primitives this module provides. The hook is here so
-/// callers can target it once the vendoring lands.
+/// Available only under `--features shinobi-compat`, which pulls the
+/// `zstd` crate into the vendor set. The sequencer's decoder in
+/// `privacy_circuit_verify` calls `zstd::bulk::decompress(compressed,
+/// max_bytes)` with `max_bytes = 2 * CAIRO_PROOF_UNCOMPRESSED_BYTES`
+/// — our output round-trips through it.
+#[cfg(feature = "shinobi-compat")]
+pub fn frame_with_zstd(bytes: &[u8]) -> Vec<u8> {
+    zstd::encode_all(bytes, ZSTD_LEVEL).expect("zstd encode")
+}
+
+#[cfg(not(feature = "shinobi-compat"))]
 pub fn frame_with_zstd(_bytes: &[u8]) -> Vec<u8> {
-    unimplemented!(
-        "zstd-level-{ZSTD_LEVEL} framing not yet vendored. Tracked separately from \
-         `circuit_serialize` primitives."
+    panic!(
+        "frame_with_zstd requires --features shinobi-compat (which enables the zstd dep)"
     );
 }
 
@@ -358,6 +363,31 @@ mod tests {
         // First element of program starts at (PUBLIC_DATA_LEN+1)*4.
         let off2 = (PUBLIC_DATA_LEN + NUM_OUTPUTS) * 4;
         assert_eq!(&prefix[off2..off2 + 4], &3u32.to_le_bytes());
+    }
+
+    /// Under `shinobi-compat`, the zstd level-3 encoder matches the
+    /// sequencer's `privacy_prove::compress_proof`. Round-trip a mixed
+    /// payload through `frame_with_zstd` + `zstd::decode_all` to
+    /// verify the framing is non-empty, well-formed, and lossless.
+    #[test]
+    #[cfg(feature = "shinobi-compat")]
+    fn zstd_framing_roundtrips_at_level_3() {
+        let mut payload = Vec::new();
+        // Mix of high-entropy (random-looking) and low-entropy (zeros)
+        // so the compressor has something meaningful to do.
+        for i in 0u32..4096 {
+            payload.extend_from_slice(&i.wrapping_mul(0x9E37_79B9).to_le_bytes());
+        }
+        payload.extend(std::iter::repeat(0u8).take(4096));
+
+        let framed = frame_with_zstd(&payload);
+        assert!(!framed.is_empty(), "compressed output is non-empty");
+        // Zstd frame magic: 0x28B52FFD LE.
+        assert_eq!(&framed[..4], &[0x28, 0xB5, 0x2F, 0xFD],
+            "output starts with zstd frame magic");
+
+        let decoded = zstd::decode_all(&framed[..]).expect("zstd decode");
+        assert_eq!(decoded, payload, "zstd framing must round-trip losslessly");
     }
 
     #[test]

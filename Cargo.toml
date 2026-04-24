@@ -23,9 +23,9 @@ default = []
 bench-max-size = []
 # Match Starknet Shinobi (v0.14.2) hardcoded Cairo verifier parameters:
 # BLOWUP_BITS=3, POW_BITS=27, N_QUERIES=23. Source pinned at
-# proving-utils@0305dbe. zstd-level-3 framing is a separate step
-# (vendoring required); see `circuit_serialize::frame_with_zstd`.
-shinobi-compat = []
+# proving-utils@0305dbe. Enables zstd for `frame_with_zstd` to match
+# the sequencer's `privacy_prove::compress_proof` at level 3.
+shinobi-compat = ["dep:zstd"]
 # Enables the `cuda_reduce_words_to_m31` GPU kernel and
 # `blake2s_m31::reduce_device_buffer` helper — infrastructure for the
 # full Blake2sM31 Merkle rewrite (tracked separately). DOES NOT
@@ -76,6 +76,9 @@ clap = { version = "4", features = ["derive"] }
 rand = "0.9"
 rayon = "1"
 blake2 = "0.10"
+# zstd used by shinobi-compat to match Starknet Shinobi's
+# `privacy_prove::compress_proof` level-3 framing.
+zstd = { version = "0.13", optional = true }
 
 [build-dependencies]
 cc = "1.2"
