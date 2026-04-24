@@ -68,13 +68,26 @@ pub fn build_dict_raw_traces(
     let dict_n = 1usize << dict_log_n;
 
     // ---- Exec trace (execution order) ----
+    // Reduction matches the main-trace dict columns in prover.rs: both
+    // must apply the SAME truncation so the S_dict link check in
+    // prover.rs:1393 (`s_dict_final == exec_key_new_sum`) holds when
+    // u64 dict values exceed 2^31. The convention is `value % 2^31`
+    // (low-31 bits) — matching `(v % (P + 1)) as u32` in prover.rs.
+    //
+    // Felt252-dict Phase 2a caveat: this still drops bits beyond 31 for
+    // dict values > 2^31-1. The full felt precision is preserved only
+    // in the dict_side_table commitment, which is bound to Fiat-Shamir
+    // but whose high limbs are NOT constrained by the main-trace logic.
+    #[inline]
+    fn reduce_to_m31(v: u64) -> u32 { (v & 0x7FFF_FFFF) as u32 }
+
     let mut exec_key  = vec![0u32; dict_n];
     let mut exec_prev = vec![0u32; dict_n];
     let mut exec_new  = vec![0u32; dict_n];
     for (i, &(_step, k, p, nv)) in accesses.iter().enumerate() {
-        exec_key[i]  = k  as u32;
-        exec_prev[i] = p  as u32;
-        exec_new[i]  = nv as u32;
+        exec_key[i]  = reduce_to_m31(k);
+        exec_prev[i] = reduce_to_m31(p);
+        exec_new[i]  = reduce_to_m31(nv);
     }
 
     // ---- Sorted trace (key-sorted) ----
@@ -96,9 +109,9 @@ pub fn build_dict_raw_traces(
     let mut sorted_is_first = vec![1u32; dict_n];
 
     for (i, &(k, p, nv)) in sorted.iter().enumerate() {
-        sorted_key[i]      = k  as u32;
-        sorted_prev_col[i] = p  as u32;
-        sorted_new_col[i]  = nv as u32;
+        sorted_key[i]      = reduce_to_m31(k);
+        sorted_prev_col[i] = reduce_to_m31(p);
+        sorted_new_col[i]  = reduce_to_m31(nv);
         sorted_is_first[i] = if i == 0 || sorted[i - 1].0 != k { 1 } else { 0 };
     }
 

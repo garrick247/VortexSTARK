@@ -535,8 +535,6 @@ pub fn execute_to_columns_with_hints(
         let op0_base = if instr.op0_reg == 1 { state.fp } else { state.ap };
         let op0_addr = op0_base.wrapping_add(instr.off1.wrapping_sub(0x8000) as i16 as i64 as u64);
         let op0 = memory.get(op0_addr);
-        // Track data values that exceed M31 — these would be silently truncated, producing wrong proofs.
-        if op0 >= P as u64 { hint_ctx.execution_overflows += 1; }
 
         let op1_base = if instr.op1_imm == 1 { state.pc }
             else if instr.op1_fp == 1 { state.fp }
@@ -544,7 +542,31 @@ pub fn execute_to_columns_with_hints(
             else { op0 };
         let op1_addr = op1_base.wrapping_add(instr.off2.wrapping_sub(0x8000) as i16 as i64 as u64);
         let op1 = memory.get(op1_addr);
-        if op1 >= P as u64 { hint_ctx.execution_overflows += 1; }
+
+        // Overflow tracking — narrowed to arithmetic instructions only.
+        //
+        // Rationale (Phase 2b of FELT252_DESIGN.md): a felt252 value passed
+        // through memory unchanged (dict retrieve → assert_eq → syscall
+        // consume) is safe even if its low 64 bits exceed M31, because no
+        // M31-truncating arithmetic is performed in the proof. Only
+        // `res_add` and `res_mul` collapse u64 → M31 silently, so they're
+        // the only sites that can produce a "proof of a different
+        // computation" if either operand exceeds P. Bumping overflow at
+        // these sites (instead of at every memory load) lets real Starknet
+        // programs — which typically store felt values in dicts and pass
+        // them to syscalls as opaque blobs — execute without tripping
+        // `ExecutionRangeViolation`.
+        //
+        // Soundness for pass-through: the trace columns still commit only
+        // low-31 bits, but the dict_side_table (Phase 2a) binds the full
+        // felt precision via its own Merkle commitment mixed into
+        // Fiat-Shamir, and its low-31 ↔ exec-log link is verified at
+        // src/cairo_air/prover.rs:3342–3363. High bits travel with the
+        // proof as auxiliary data, consumable by downstream checks.
+        if instr.res_add == 1 || instr.res_mul == 1 {
+            if op0 >= P as u64 { hint_ctx.execution_overflows += 1; }
+            if op1 >= P as u64 { hint_ctx.execution_overflows += 1; }
+        }
 
         let res = if instr.pc_jnz == 1 { 0 }
             else if instr.res_add == 1 {
@@ -566,9 +588,9 @@ pub fn execute_to_columns_with_hints(
                 memory.set(dst_addr + 1, state.pc + instr.size());
                 state.fp
             } else {
-                let v = memory.get(dst_addr);
-                if v >= P as u64 { hint_ctx.execution_overflows += 1; }
-                v
+                // Passthrough read (e.g. jnz predicate); no M31 arithmetic —
+                // do not bump overflow.
+                memory.get(dst_addr)
             };
 
         let next_pc = if instr.pc_jump_abs == 1 { res }

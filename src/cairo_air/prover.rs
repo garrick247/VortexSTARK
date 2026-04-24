@@ -5903,33 +5903,91 @@ mod tests {
 
     #[test]
     fn test_execution_range_violation_detected() {
-        // A program that loads an immediate > M31 as a data value.
-        // The instruction `[ap+0] = 2^31` has an immediate operand of 2^31 = P (M31 wrap).
-        // When the VM reads op1 = memory.get(pc+1) = 2^31, it's ≥ P → overflow.
+        // Phase 2b (FELT252_DESIGN.md): the VM overflow check fires only
+        // when a > P operand is consumed by M31 arithmetic (`res_add` or
+        // `res_mul`). Pass-through values (`assert_eq [ap] imm_P`) no
+        // longer trigger — matches the design rule that felt252 values
+        // are safe as long as they never enter M31 arithmetic.
+        //
+        // This test verifies the arithmetic case still rejects:
+        // [ap+0] = [ap-1] + imm_P  — if op1 = P, the add would silently
+        // collapse to M31 and produce a proof of the wrong computation.
         ffi::init_memory_pool();
         use crate::cairo_air::casm_loader::{CasmProgram, CasmFormat};
-        let assert_imm = Instruction {
-            off0: 0x8000, off1: 0x8000, off2: 0x8001,
+        // First instruction: assert_eq [ap-1] with imm 0 so op0 is defined
+        // (points at a valid memory cell), ap_add1 to advance.
+        let init = Instruction {
+            off0: 0x7FFF, off1: 0x8000, off2: 0x8001,
             op1_imm: 1, opcode_assert: 1, ap_add1: 1,
             ..Default::default()
         };
-        let large_immediate: u64 = (1u64 << 31); // = P, ≥ M31
-        let bc = vec![assert_imm.encode(), large_immediate];
+        // Arithmetic instruction: [ap+0] = [ap-1] + imm_P.
+        //   dst_reg=0 (ap-relative), off0=0x8000 → dst = [ap]
+        //   op0_reg=0, off1=0x7FFF → op0 = [ap-1]
+        //   op1_imm=1, off2=0x8001 → op1 = immediate at pc+1
+        //   res_add=1, opcode_assert=1, ap_add1=1
+        let arith_add_imm = Instruction {
+            off0: 0x8000, off1: 0x7FFF, off2: 0x8001,
+            op1_imm: 1, res_add: 1, opcode_assert: 1, ap_add1: 1,
+            ..Default::default()
+        };
+        let large_immediate: u64 = 1u64 << 31; // = P
+        let bc = vec![init.encode(), 0u64, arith_add_imm.encode(), large_immediate];
         let bc_felt = bc.iter().map(|&v| crate::felt252::Felt252::from_u64(v)).collect();
         let program = CasmProgram {
             bytecode: bc,
             bytecode_felt: bc_felt,
             entry_point: 0,
-            name: "test_overflow".into(),
+            name: "test_overflow_arith".into(),
             builtins: vec![],
             format: CasmFormat::CasmJson,
             hints: vec![],
             overflow_count: 0,
         };
-        let result = cairo_prove_program(&program, 1, 1);
+        let result = cairo_prove_program(&program, 2, 2);
+        let rejected = matches!(
+            &result, Err(ProveError::ExecutionRangeViolation { count }) if *count > 0,
+        );
         assert!(
-            matches!(result, Err(ProveError::ExecutionRangeViolation { count }) if count > 0),
-            "immediate > M31 during execution must be rejected"
+            rejected,
+            "M31 arithmetic with > P operand must be rejected",
+        );
+    }
+
+    /// Companion to `test_execution_range_violation_detected`: verifies
+    /// the VM-level lift directly. Runs a synthetic trace that stores
+    /// a > P value via `assert_eq` with an immediate, with NO arithmetic
+    /// instruction. Asserts that `hint_ctx.execution_overflows == 0`,
+    /// i.e. the VM does not flag pass-through of a felt252 value as a
+    /// range violation. Bypasses the full prover pipeline so that small
+    /// synthetic traces don't trip FRI sizing requirements — the lift
+    /// being tested is purely in `vm::execute_to_columns`.
+    #[test]
+    fn test_execution_passthrough_felt_allowed() {
+        ffi::init_memory_pool();
+        use super::Memory;
+        use crate::cairo_air::hints::HintContext;
+        let assert_imm = Instruction {
+            off0: 0x8000, off1: 0x8000, off2: 0x8001,
+            op1_imm: 1, opcode_assert: 1, ap_add1: 1,
+            ..Default::default()
+        };
+        let large_immediate: u64 = 1u64 << 31; // = P — would silently fold to 0 under M31.
+        let bytecode = vec![assert_imm.encode(), large_immediate];
+        let mut mem = Memory::with_capacity(64);
+        mem.load_program(&bytecode);
+        let mut hint_ctx = HintContext::new();
+        // Single step: ap starts at 2 (just past the 2-word program). The
+        // instruction is `[ap+0] = imm_P`. op1 is the immediate (= P).
+        // With the Phase 2b lift this is pass-through and must NOT bump
+        // execution_overflows; without the lift it would bump twice (op1
+        // load + dst load).
+        let _trace = super::super::vm::execute_to_columns_with_hints(
+            &mut mem, 1, 1, &[], 0, 2, &mut hint_ctx,
+        );
+        assert_eq!(
+            hint_ctx.execution_overflows, 0,
+            "pass-through of > P via assert_eq must not count as execution overflow",
         );
     }
 
@@ -5998,6 +6056,66 @@ mod tests {
         let columns = super::super::vm::execute_to_columns(&mut mem, 32, 5);
         let cache = CairoProverCache::new(5);
         cairo_prove_cached_with_columns(&program, columns, 32, 5, &cache, None, dict_accesses, &[], Vec::new())
+    }
+
+    /// End-to-end felt252 dict round trip. Feeds the prover a parallel
+    /// `dict_accesses_felt` log whose values exceed the u64/M31 range
+    /// (high Felt252 limbs populated). Asserts:
+    ///   (a) the prover builds a valid dict_side_table at full
+    ///       felt precision — no ExecutionRangeViolation on load,
+    ///   (b) the verifier accepts the proof (side-table root bound
+    ///       to Fiat-Shamir, low-31 bits link to exec_data),
+    ///   (c) the committed side-table preserves the high limbs.
+    /// This is the Phase 2 check for FELT252_DESIGN.md.
+    #[test]
+    fn test_dict_felt252_values_roundtrip() {
+        use crate::felt252::Felt252;
+        ffi::init_memory_pool();
+
+        // A felt with non-trivial high limbs — above 2^64, above 2^128.
+        // Limb 1, limb 2 populated so to_m31_limbs_9 returns non-zero
+        // beyond the low ones.
+        let high_felt = Felt252 {
+            v: [0xDEADBEEF_CAFEBABE, 0x0123456789ABCDEF, 0x1, 0x0],
+        };
+
+        // u64 log carries the low-64 bits (lossy) — matches the main
+        // trace's M31-truncated representation. The felt log carries
+        // the full 252-bit value.
+        let u64_accesses: Vec<(usize, u64, u64, u64)> = vec![
+            (0, 1, 0, 0xDEADBEEF_CAFEBABE),
+            (1, 1, 0xDEADBEEF_CAFEBABE, 7),
+        ];
+        let felt_accesses: Vec<(usize, Felt252, Felt252, Felt252)> = vec![
+            (0, Felt252::from_u64(1), Felt252::from_u64(0), high_felt),
+            (1, Felt252::from_u64(1), high_felt, Felt252::from_u64(7)),
+        ];
+
+        let program = build_fib_program(32);
+        let mut mem = super::Memory::with_capacity(512);
+        mem.load_program(&program);
+        let columns = super::super::vm::execute_to_columns(&mut mem, 32, 5);
+        let cache = CairoProverCache::new(5);
+        let proof = cairo_prove_cached_with_columns(
+            &program, columns, 32, 5, &cache, None,
+            &u64_accesses, &felt_accesses, Vec::new(),
+        );
+
+        // (a) side table populated at full felt precision
+        assert_eq!(proof.dict_side_table.len(), 2, "one row per access");
+        let row0 = &proof.dict_side_table[0];
+        // Row layout: [ptr, key[0..9], prev[0..9], new[0..9]]. For row 0,
+        // the new-value is the high felt — its limbs beyond the low ones
+        // must be non-zero.
+        let high_limbs = &row0[19..28]; // new value
+        assert!(
+            high_limbs.iter().skip(2).any(|&w| w != 0),
+            "high limbs of the felt must be preserved in the side table, got {:?}",
+            high_limbs,
+        );
+
+        // (b) verifier accepts the proof end-to-end
+        cairo_verify(&proof).expect("felt252 dict proof must verify");
     }
 
     #[test]
