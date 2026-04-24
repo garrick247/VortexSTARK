@@ -3177,6 +3177,12 @@ pub fn cairo_verify(proof: &CairoProof) -> Result<(), String> {
     if !proof.dict_exec_data.is_empty() {
         use super::logup::qm31_from_m31;
         let n_acc = proof.dict_n_accesses;
+        // Prevent panic on malformed dict_n_accesses > dict_exec_data.len().
+        if n_acc > proof.dict_exec_data.len() {
+            return Err(format!(
+                "dict_n_accesses {n_acc} exceeds dict_exec_data length {}",
+                proof.dict_exec_data.len()));
+        }
         // Validate that padding rows are genuinely zero.
         for (idx, row) in proof.dict_exec_data.iter().enumerate().skip(n_acc) {
             if *row != [0u32, 0, 0] {
