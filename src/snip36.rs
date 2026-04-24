@@ -3,76 +3,98 @@
 //! accepts.
 //!
 //! SNIP-36 adds two fields to Invoke V3 transactions:
-//!   * `proof: Vec<u32>` — the full STARK proof (mempool-only, base64
-//!     in RPC). Passed to the S-Two verifier integrated into the
-//!     Starknet gateway and sequencer.
-//!   * `proof_facts: Vec<Felt252>` — the public facts derivable from
-//!     the proof, made available to contracts via the new
-//!     `get_execution_info_v3` syscall.
+//!   * `proof: Arc<Vec<u8>>` — raw proof bytes, serialized as base64
+//!     in JSON-RPC (confirmed by reading
+//!     `starkware-libs/sequencer/crates/starknet_api/src/transaction/fields.rs`
+//!     as of 2026-04). Verified by the `privacy_circuit_verify` crate.
+//!   * `proof_facts: Vec<Felt>` — the public facts the proof attests
+//!     to, exposed to contracts via `get_execution_info_v3`.
 //!
-//! ## Wire format
+//! ## ⚠ Phase 1 only accepts SNOS (Starknet OS) proofs
 //!
-//! The `proof` field is a flat `Vec<u32>` (little-endian) of the
-//! bincode serialization of a stwo-compatible proof structure. We
-//! reuse `TwoStarkProof` from `stwo_export` so the JSON and wire
-//! formats stay in sync — swapping `serde_json` for `bincode` at the
-//! boundary. This is NOT yet cross-validated against mainnet's
-//! verifier; see the cross-validation notes below.
+//! The sequencer's `starknet_proof_verifier/src/proof_verifier.rs`
+//! rejects any proof whose `proof_facts[1] != VIRTUAL_SNOS`:
 //!
-//! ## proof_facts layout
+//! ```text
+//! VIRTUAL_SNOS                 = ASCII "VIRTUAL_SNOS"
+//! Error: "Non-SNOS proofs are not currently supported"
+//! ```
 //!
-//! Each field is a single `Felt252` (u256 little-endian). Order matches
-//! how `get_execution_info_v3` exposes them to contracts:
-//!   0: program_hash (Blake2s digest packed as a single felt)
-//!   1: initial_pc
-//!   2: initial_ap
-//!   3: n_steps
-//!   4+: caller-supplied outputs (not derivable from the proof alone)
+//! VortexSTARK currently proves single-Cairo-program executions, NOT
+//! Starknet OS (SNOS) runs. This means:
+//! - VortexSTARK output wrapped as SNIP-36 will be **rejected** by
+//!   mainnet Phase 1. Submitting it would error out, not produce a
+//!   silent accept of a bad proof.
+//! - To ship on mainnet under Shinobi, VortexSTARK would need to
+//!   either prove an SNOS execution (a much larger Cairo program),
+//!   or wait for a future SNIP that accepts arbitrary Cairo-AIR
+//!   proofs (planned, not shipped).
 //!
-//! A contract reads `proof_facts` to confirm the proof corresponds to
-//! the expected program + entry point before acting on it.
+//! ## proof_facts layout (actual, from sequencer source)
 //!
-//! ## Cross-validation
+//! The real layout is:
+//!   [0]    PROOF_VERSION = `0x50524f4f4630` (ASCII "PROOF0")
+//!   [1]    variant_marker = VIRTUAL_SNOS (only SNOS accepted Phase 1)
+//!   [2]    virtual_os_output_version = VIRTUAL_SNOS0
+//!   [3]    program_hash
+//!   [4..]  SNOS output felts
 //!
-//! Before submitting on mainnet, this encoding MUST be tested against
-//! Starknet's actual verifier. The `proof_facts` derivation is
-//! straightforward (fixed layout), but the `proof` bytes must match
-//! the exact bincode convention the gateway expects. A testnet
-//! transaction with a known-valid proof is the definitive check.
+//! Our `proof_facts_snos_placeholder` builds the first three markers
+//! correctly so the CLI can emit syntactically-correct Invoke V3 JSON
+//! for tooling/testing. The `[4..]` SNOS output must come from an
+//! actual SNOS run, not from VortexSTARK's single-program proof.
+//!
+//! ## Wire format for `proof` bytes
+//!
+//! Still TBD against the actual `privacy_circuit_verify` deserializer.
+//! Current placeholder: serde_json bytes. Do NOT use for mainnet.
 
 use crate::cairo_air::prover::CairoProof;
 use crate::felt252::Felt252;
 
-/// A SNIP-36-ready bundle: the flat `proof` u32 array + the
-/// `proof_facts` Felt252 array. Caller packs these into an Invoke V3
-/// transaction via [`build_invoke_v3_tx`].
+/// A SNIP-36-ready bundle: raw `proof` bytes + the `proof_facts`
+/// Felt252 array. Caller packs these into an Invoke V3 transaction
+/// via [`build_invoke_v3_tx`], which base64-encodes the bytes for
+/// JSON-RPC transport.
 #[derive(Clone, Debug)]
 pub struct Snip36Bundle {
-    /// Full STARK proof as a little-endian u32 array. The on-chain
-    /// verifier deserializes this back into a stwo `StarkProof`.
-    pub proof: Vec<u32>,
+    /// Full STARK proof as raw bytes. The sequencer's `Proof` type is
+    /// `Arc<Vec<u8>>`, serialized as base64 in JSON.
+    pub proof: Vec<u8>,
     /// Public facts the proof attests to. Exposed to contracts
     /// through `get_execution_info_v3.proof_facts`.
     pub proof_facts: Vec<Felt252>,
 }
 
-/// Derive the Felt252 proof_facts array from a `CairoProof`.
+/// PROOF_VERSION marker — ASCII "PROOF0" as a felt252.
+/// Matches `starkware-libs/sequencer/crates/starknet_api/src/transaction/fields.rs`.
+pub const PROOF_VERSION_HEX: &str = "0x50524f4f4630";
+
+/// VIRTUAL_SNOS variant marker — ASCII "VIRTUAL_SNOS" as a felt252.
+/// The ONLY variant Phase 1 accepts.
+pub const VIRTUAL_SNOS_HEX: &str = "0x5649525455414c5f534e4f53";
+
+/// VIRTUAL_OS_OUTPUT_VERSION — ASCII "VIRTUAL_SNOS0" as a felt252.
+pub const VIRTUAL_OS_OUTPUT_VERSION_HEX: &str = "0x5649525455414c5f534e4f5330";
+
+/// Build proof_facts with the correct Phase 1 header markers.
 ///
-/// Layout (fixed for v0 of the integration — update the version byte
-/// if the layout ever changes):
-///   [0]    version = 1
-///   [1]    program_hash (packed as one felt; Blake2s-256 output
-///          is 32 bytes, fits in a felt252)
-///   [2]    initial_pc
-///   [3]    initial_ap
-///   [4]    n_steps
-pub fn proof_facts(proof: &CairoProof) -> Vec<Felt252> {
+/// WARNING: `proof_facts[4..]` must be the actual SNOS output for the
+/// proof to verify. A VortexSTARK single-Cairo-program proof does
+/// **not** produce SNOS output; submitting this to mainnet will be
+/// rejected by the privacy-circuit verifier. This helper is provided
+/// for tooling, testing, and future SNOS-prover work.
+///
+/// Layout (matches sequencer source, 2026-04):
+///   [0] PROOF_VERSION
+///   [1] VIRTUAL_SNOS
+///   [2] VIRTUAL_OS_OUTPUT_VERSION
+///   [3] program_hash (from the proof's public_inputs)
+///   [4..] caller-supplied SNOS output felts (passed in as `snos_output`)
+pub fn proof_facts(proof: &CairoProof, snos_output: &[Felt252]) -> Vec<Felt252> {
     let pi = &proof.public_inputs;
     // Pack the 8×u32 program_hash into a single Felt252 (32 bytes,
-    // which fits in 252 bits with 2 bits to spare — Blake2s outputs
-    // never set the top 4 bits of the leading byte in practice, and
-    // even if they did, the 252-bit Stark prime is large enough to
-    // hold any 32-byte value mod p unambiguously for hash comparison).
+    // fits in 252 bits modulo the Stark prime).
     let hash_bytes = {
         let mut b = [0u8; 32];
         for (i, &w) in pi.program_hash.iter().enumerate() {
@@ -82,45 +104,73 @@ pub fn proof_facts(proof: &CairoProof) -> Vec<Felt252> {
     };
     let program_hash_felt = crate::felt252::from_le_bytes(&hash_bytes);
 
-    vec![
-        Felt252::from_u64(1), // version
-        program_hash_felt,
-        Felt252::from_u64(pi.initial_pc as u64),
-        Felt252::from_u64(pi.initial_ap as u64),
-        Felt252::from_u64(pi.n_steps as u64),
-    ]
+    let mut facts = Vec::with_capacity(4 + snos_output.len());
+    facts.push(Felt252::from_hex(PROOF_VERSION_HEX));
+    facts.push(Felt252::from_hex(VIRTUAL_SNOS_HEX));
+    facts.push(Felt252::from_hex(VIRTUAL_OS_OUTPUT_VERSION_HEX));
+    facts.push(program_hash_felt);
+    facts.extend_from_slice(snos_output);
+    facts
 }
 
-/// Serialize a `CairoProof` into the flat u32 wire format SNIP-36
-/// expects. Current encoding: JSON-serialize the stwo-compatible
-/// proof structure, then reinterpret the UTF-8 byte stream as u32
-/// little-endian words (padded with zeros to a multiple of 4 bytes).
+/// Serialize a `CairoProof` into raw bytes. The on-wire `Proof` field
+/// is `Arc<Vec<u8>>` base64-encoded in RPC; this returns the inner
+/// bytes, which [`build_invoke_v3_tx`] then base64-encodes.
 ///
-/// **Cross-validation TODO:** Starknet's verifier almost certainly
-/// expects a binary (bincode-style) encoding, not JSON. This JSON
-/// path is a placeholder that keeps the VortexSTARK side unblocked
-/// without vendoring a new dependency. Before mainnet submission,
-/// swap the encoder for whatever the reference S-Two verifier parses
-/// (test against `starknet-devnet-rs` or Starknet testnet with a
-/// known-valid proof).
-pub fn proof_to_snip36_bytes(proof: &CairoProof) -> Vec<u32> {
+/// **Cross-validation TODO:** the exact binary layout the
+/// `privacy_circuit_verify` crate expects has not been cross-checked.
+/// Current placeholder: serde_json serialization of the stwo proof
+/// structure. Before mainnet submission, swap for whatever
+/// `privacy_circuit_verify` actually parses and test against
+/// starknet-devnet-rs with a known-valid (SNOS) proof.
+pub fn proof_to_snip36_bytes(proof: &CairoProof) -> Vec<u8> {
     let two_proof = crate::stwo_export::cairo_proof_to_stwo(proof);
-    let bytes = serde_json::to_vec(&two_proof)
-        .expect("stwo proof serde_json encode");
-    let padded_len = (bytes.len() + 3) & !3;
-    let mut padded = bytes;
-    padded.resize(padded_len, 0);
-    padded
-        .chunks_exact(4)
-        .map(|c| u32::from_le_bytes(c.try_into().expect("chunks_exact(4)")))
-        .collect()
+    serde_json::to_vec(&two_proof).expect("stwo proof serde_json encode")
+}
+
+/// Base64 encoding using the standard alphabet (RFC 4648) — matches
+/// the sequencer's `base64::encode` call on the `Proof` type.
+fn base64_encode(bytes: &[u8]) -> String {
+    const ALPHABET: &[u8; 64] =
+        b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    let mut out = String::with_capacity((bytes.len() + 2) / 3 * 4);
+    let mut i = 0;
+    while i + 3 <= bytes.len() {
+        let b = [bytes[i], bytes[i + 1], bytes[i + 2]];
+        out.push(ALPHABET[(b[0] >> 2) as usize] as char);
+        out.push(ALPHABET[(((b[0] & 0x03) << 4) | (b[1] >> 4)) as usize] as char);
+        out.push(ALPHABET[(((b[1] & 0x0f) << 2) | (b[2] >> 6)) as usize] as char);
+        out.push(ALPHABET[(b[2] & 0x3f) as usize] as char);
+        i += 3;
+    }
+    let rem = bytes.len() - i;
+    if rem == 1 {
+        let b0 = bytes[i];
+        out.push(ALPHABET[(b0 >> 2) as usize] as char);
+        out.push(ALPHABET[((b0 & 0x03) << 4) as usize] as char);
+        out.push('=');
+        out.push('=');
+    } else if rem == 2 {
+        let b0 = bytes[i];
+        let b1 = bytes[i + 1];
+        out.push(ALPHABET[(b0 >> 2) as usize] as char);
+        out.push(ALPHABET[(((b0 & 0x03) << 4) | (b1 >> 4)) as usize] as char);
+        out.push(ALPHABET[((b1 & 0x0f) << 2) as usize] as char);
+        out.push('=');
+    }
+    out
 }
 
 /// Build both halves of the SNIP-36 bundle from a single `CairoProof`.
-pub fn to_snip36_bundle(proof: &CairoProof) -> Snip36Bundle {
+/// `snos_output` is the virtual-OS task output that follows the
+/// PROOF_VERSION/VIRTUAL_SNOS/VIRTUAL_OS_OUTPUT_VERSION/program_hash
+/// header. An empty slice produces a syntactically-valid Invoke V3
+/// payload, but will fail verification because the SNOS task content
+/// is empty.
+pub fn to_snip36_bundle(proof: &CairoProof, snos_output: &[Felt252]) -> Snip36Bundle {
     Snip36Bundle {
         proof: proof_to_snip36_bytes(proof),
-        proof_facts: proof_facts(proof),
+        proof_facts: proof_facts(proof, snos_output),
     }
 }
 
@@ -149,6 +199,10 @@ pub fn build_invoke_v3_tx(
         })
         .collect();
 
+    // Proof is serialized as base64 per the sequencer's
+    // `impl Serialize for Proof { serializer.serialize_str(base64::encode(...)) }`.
+    let proof_b64 = base64_encode(&bundle.proof);
+
     serde_json::json!({
         "type": "INVOKE",
         "version": "0x3",
@@ -163,7 +217,7 @@ pub fn build_invoke_v3_tx(
         "nonce_data_availability_mode": "L1",
         "fee_data_availability_mode": "L1",
         // SNIP-36 fields
-        "proof": bundle.proof,
+        "proof": proof_b64,
         "proof_facts": proof_facts_hex,
     })
 }
@@ -275,15 +329,37 @@ mod tests {
             oods_interaction_at_z_next: [[[0; 4]; 4]; 3],
         };
 
-        let facts = proof_facts(&proof);
-        assert_eq!(facts.len(), 5, "v0 proof_facts has 5 entries");
-        assert_eq!(facts[0], Felt252::from_u64(1), "facts[0] = version");
-        // facts[1] = packed program_hash
+        // Pass empty SNOS output — just verifies the header layout.
+        let facts = proof_facts(&proof, &[]);
+        assert_eq!(facts.len(), 4, "header has 4 entries before SNOS output");
+        assert_eq!(facts[0], Felt252::from_hex(PROOF_VERSION_HEX),
+            "facts[0] = PROOF_VERSION ('PROOF0')");
+        assert_eq!(facts[1], Felt252::from_hex(VIRTUAL_SNOS_HEX),
+            "facts[1] = VIRTUAL_SNOS (Phase 1 only accepts this variant)");
+        assert_eq!(facts[2], Felt252::from_hex(VIRTUAL_OS_OUTPUT_VERSION_HEX),
+            "facts[2] = VIRTUAL_OS_OUTPUT_VERSION ('VIRTUAL_SNOS0')");
+        // facts[3] = program_hash packed as felt
         use crate::felt252::FeltExt;
-        let hash_hex = facts[1].to_hex_0x();
+        let hash_hex = facts[3].to_hex_0x();
         assert!(hash_hex.starts_with("0x"), "program_hash felt prints as hex");
-        assert_eq!(facts[2], Felt252::from_u64(42), "facts[2] = initial_pc");
-        assert_eq!(facts[3], Felt252::from_u64(100), "facts[3] = initial_ap");
-        assert_eq!(facts[4], Felt252::from_u64(32), "facts[4] = n_steps");
+
+        // With a two-felt SNOS output, layout grows to 6.
+        let snos_output = vec![Felt252::from_u64(999), Felt252::from_u64(1000)];
+        let facts_with = proof_facts(&proof, &snos_output);
+        assert_eq!(facts_with.len(), 6);
+        assert_eq!(facts_with[4], Felt252::from_u64(999));
+        assert_eq!(facts_with[5], Felt252::from_u64(1000));
+    }
+
+    #[test]
+    fn base64_encode_roundtrip() {
+        // Smoke test against known vectors.
+        assert_eq!(base64_encode(b""), "");
+        assert_eq!(base64_encode(b"f"), "Zg==");
+        assert_eq!(base64_encode(b"fo"), "Zm8=");
+        assert_eq!(base64_encode(b"foo"), "Zm9v");
+        assert_eq!(base64_encode(b"foob"), "Zm9vYg==");
+        assert_eq!(base64_encode(b"fooba"), "Zm9vYmE=");
+        assert_eq!(base64_encode(b"foobar"), "Zm9vYmFy");
     }
 }

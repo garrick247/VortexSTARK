@@ -222,6 +222,11 @@ enum Commands {
         /// Account nonce (felt252 hex)
         #[arg(long, default_value = "0x0")]
         nonce: String,
+        /// SNOS task output as space-separated felt252 hex values.
+        /// Required for Phase 1 verification (VIRTUAL_SNOS only).
+        /// Leave empty to emit a syntactically-valid but unverifiable payload.
+        #[arg(long, default_value = "")]
+        snos_output: String,
         /// Output path for the Invoke V3 JSON
         #[arg(short, long, default_value = "snip36_tx.json")]
         output: String,
@@ -265,9 +270,11 @@ fn main() {
         Commands::Verify { proof } => cmd_verify(&proof),
         Commands::Bench { log_n } => cmd_bench(log_n),
         Commands::BuildSnip36Tx {
-            proof, sender_address, entry_point_selector, calldata, nonce, output
+            proof, sender_address, entry_point_selector, calldata, nonce,
+            snos_output, output
         } => cmd_build_snip36_tx(
-            &proof, &sender_address, &entry_point_selector, &calldata, &nonce, &output
+            &proof, &sender_address, &entry_point_selector, &calldata, &nonce,
+            &snos_output, &output
         ),
     }
 }
@@ -278,19 +285,25 @@ fn cmd_build_snip36_tx(
     entry_point_selector: &str,
     calldata_str: &str,
     nonce: &str,
+    snos_output_str: &str,
     output: &str,
 ) {
     use vortexstark::cairo_air::prover::CairoProof;
+    use vortexstark::felt252::Felt252;
     let bytes = std::fs::read(proof_path)
         .unwrap_or_else(|e| { eprintln!("ERROR reading {proof_path}: {e}"); std::process::exit(1) });
-    // Accept either binary bincode (from prove-file) or JSON.
     let proof: CairoProof = if bytes.starts_with(b"{") {
         serde_json::from_slice(&bytes)
             .unwrap_or_else(|e| { eprintln!("ERROR parsing JSON proof: {e}"); std::process::exit(1) })
     } else {
         deserialize_cairo_proof(&bytes)
     };
-    let bundle = vortexstark::snip36::to_snip36_bundle(&proof);
+    let snos_output: Vec<Felt252> = snos_output_str
+        .split_whitespace()
+        .filter(|s| !s.is_empty())
+        .map(Felt252::from_hex)
+        .collect();
+    let bundle = vortexstark::snip36::to_snip36_bundle(&proof, &snos_output);
     let calldata_hex: Vec<String> = calldata_str
         .split_whitespace()
         .filter(|s| !s.is_empty())
@@ -314,12 +327,19 @@ fn cmd_build_snip36_tx(
     std::fs::write(output, &json)
         .unwrap_or_else(|e| { eprintln!("ERROR writing {output}: {e}"); std::process::exit(1) });
     eprintln!("SNIP-36 Invoke V3 tx: {} bytes → {output}", json.len());
-    eprintln!("  proof array:  {} u32 words", bundle.proof.len());
-    eprintln!("  proof_facts:  {} felts", bundle.proof_facts.len());
-    eprintln!("WARNING: proof encoding is a placeholder until cross-validated");
-    eprintln!("         against Starknet's S-Two verifier. Do NOT submit this");
-    eprintln!("         payload to mainnet without verifying acceptance on a");
-    eprintln!("         testnet or devnet endpoint first.");
+    eprintln!("  proof bytes:  {} (base64-encoded in JSON)", bundle.proof.len());
+    eprintln!("  proof_facts:  {} felts (PROOF_VERSION, VIRTUAL_SNOS, VIRTUAL_SNOS0, program_hash, ...snos_output)",
+        bundle.proof_facts.len());
+    eprintln!();
+    eprintln!("⚠ Phase 1 (Shinobi/v0.14.2) ONLY accepts SNOS proofs.");
+    eprintln!("  VortexSTARK's current Cairo-program proofs are NOT SNOS.");
+    eprintln!("  Submitting this payload to mainnet will be REJECTED by");
+    eprintln!("  the privacy-circuit verifier with a 'Non-SNOS proofs are");
+    eprintln!("  not currently supported' error.");
+    eprintln!();
+    eprintln!("  The proof-byte encoding is also a placeholder (serde_json)");
+    eprintln!("  and MUST be cross-validated against the privacy_circuit_verify");
+    eprintln!("  deserializer before any real submission.");
 }
 
 fn cmd_prove(log_n: u32, a: u32, b: u32, output: &str) {
