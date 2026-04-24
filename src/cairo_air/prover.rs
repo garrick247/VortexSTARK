@@ -3812,6 +3812,12 @@ pub fn cairo_verify(proof: &CairoProof) -> Result<(), String> {
     if let (Some(ec_commit_lo), Some(ec_commit_hi), Some(ec_log_eval)) =
         (&proof.ec_trace_commitment, &proof.ec_trace_commitment_hi, proof.ec_log_eval)
     {
+        // Bound ec_log_eval to prevent `1 << ec_log_eval` overflow for
+        // attacker-supplied values ≥ 64 (and to keep the ec_eval_size
+        // allocation reasonable).
+        if ec_log_eval > 32 {
+            return Err(format!("ec_log_eval {ec_log_eval} exceeds sanity cap 32"));
+        }
         let ec_eval_size = 1usize << ec_log_eval;
         if proof.ec_trace_auth_paths.len() != n_q
             || proof.ec_trace_auth_paths_next.len() != n_q
