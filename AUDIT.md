@@ -435,4 +435,11 @@ on a valid proof is a soundness/completeness bug.
 - [x] Initial register state documented (L2 CLOSED 2026-04-04): `CairoStatement`, `verify_cairo_statement`, README.md note
 - [x] Program hash documentation (L3 CLOSED 2026-04-04): `compute_program_hash`, `verify_cairo_statement`, README.md note
 - [x] U256InvModN test vectors (L4 CLOSED 2026-04-04): 7 new tests covering a=1, a=n-1, a=n, a=0, coprime, non-invertible, inverse property
+- [x] Fiat-Shamir challenge binding (2026-04-23 audit): `proof.oods_z`, `proof.oods_alpha`, and `proof.logup_challenges` (packing z_mem / alpha_mem / alpha_mem² / z_rc / z_dict_link / alpha_dict_link) are now compared against the channel-derived values and rejected on mismatch. Prior versions drew these challenges into `_underscore`-prefixed locals and trusted the proof's claim — a real soundness gap closed by commits 57ecfa9, b497f06, a98a6bb.
+- [x] DoS / panic hardening (2026-04-23 audit): every variable-length `Vec` bounded against `log_trace_size`; exact-length checks on `oods_trace_at_z`, `query_indices`, `trace_values_at_queries`; zero-commitment rejection for 14 commitments (trace, trace_hi, dict_trace, quotient, interaction, oods_quotient, memory_table, rc_counts, dict_main_interaction, bitwise, ec lo/hi, logup T1/T2/T3, RC U1/U2, per-layer FRI); `initial_pc < program.len()`; `ec_log_eval ≤ 32`; `dict_n_accesses ≤ dict_exec_data.len()`; `dict_exec_commitment` required when `dict_exec_data` non-empty.
+- [x] Bitwise memory bus link (2026-04-23): verifier scans `memory_table_data` for bitwise-segment addresses, cross-checks against committed `bitwise_rows`. Unbacked entries rejected.
+- [x] Dict memory bus link / R2 (2026-04-23): `dict_access_pointers` propagated from `HintContext` through to proof; verifier scans `memory_table_data` and cross-checks against `dict_exec_data`. Unbacked entries rejected.
+- [x] Proof schema version (2026-04-23): `CAIRO_PROOF_VERSION = 2`; verifier rejects mismatched versions early.
+- [x] Program hash cryptographic binding (2026-04-23): `cairo_verify` and `verify_cairo_statement` both recompute `Blake2s(public_inputs.program)` and reject any lie about the hash.
+- [x] VM memory Felt252 overlay (2026-04-23): syscall data preserved at full 252-bit precision via `memory.set_felt`/`memory.get_felt`; u64 layer remains AIR-authoritative.
 - [ ] External third-party audit
