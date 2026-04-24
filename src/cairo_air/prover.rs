@@ -1070,6 +1070,15 @@ fn cairo_prove_cached_with_columns(
         }
     };
 
+    // Keep d_hc (hc-natural GPU buffers) resident only when the 34-col
+    // eval-domain footprint fits in ~half the card. At log_n=25
+    // (eval_size=128M, 34×512MB = 17 GB) the resident path saves one
+    // H2D+permute round-trip before phase3 (~600 ms). At log_n=26
+    // (34×1 GB = 34 GB) keeping them resident exhausts VRAM before
+    // phase2_logup_rc can even allocate — so drop immediately after
+    // Merkle commit and re-upload from `host_eval_cols` in phase3.
+    let keep_hc_resident = (eval_size as u64) * (N_COLS as u64) * 4 <= 20u64 * 1024 * 1024 * 1024;
+
     // ── Group A: cols 0..TRACE_LO ──────────────────────────────────────────
     let (trace_commitment, tile_roots_lo, host_eval_lo, host_eval_lo_hc, d_eval_lo_hc): ([u32; 8], Vec<[u32; 8]>, Vec<Vec<u32>>, Vec<Vec<u32>>, Vec<DeviceBuffer<u32>>) = {
         let mut group: Vec<DeviceBuffer<u32>> = Vec::with_capacity(TRACE_LO);
@@ -1086,7 +1095,7 @@ fn cairo_prove_cached_with_columns(
         unsafe { ffi::cuda_device_sync(); }
         let cn: Vec<Vec<u32>> = group.iter().map(|c| c.to_host_fast()).collect();
         let hc: Vec<Vec<u32>> = cpu_permute_to_hc(&cn);
-        let d_hc = build_d_hc(&group);
+        let d_hc = if keep_hc_resident { build_d_hc(&group) } else { Vec::new() };
         let (root, tile_roots) = MerkleTree::commit_root_only_with_subtrees(&group, log_eval_size);
         (root, tile_roots, cn, hc, d_hc)
     };
@@ -1108,7 +1117,7 @@ fn cairo_prove_cached_with_columns(
         unsafe { ffi::cuda_device_sync(); }
         let cn: Vec<Vec<u32>> = group.iter().map(|c| c.to_host_fast()).collect();
         let hc: Vec<Vec<u32>> = cpu_permute_to_hc(&cn);
-        let d_hc = build_d_hc(&group);
+        let d_hc = if keep_hc_resident { build_d_hc(&group) } else { Vec::new() };
         let (root, tile_roots) = MerkleTree::commit_root_only_with_subtrees(&group, log_eval_size);
         (root, tile_roots, cn, hc, d_hc)
     };
@@ -1130,7 +1139,7 @@ fn cairo_prove_cached_with_columns(
         unsafe { ffi::cuda_device_sync(); }
         let cn: Vec<Vec<u32>> = group.iter().map(|c| c.to_host_fast()).collect();
         let hc: Vec<Vec<u32>> = cpu_permute_to_hc(&cn);
-        let d_hc = build_d_hc(&group);
+        let d_hc = if keep_hc_resident { build_d_hc(&group) } else { Vec::new() };
         let (root, tile_roots) = MerkleTree::commit_root_only_with_subtrees(&group, log_eval_size);
         (root, tile_roots, cn, hc, d_hc)
     };
@@ -1851,12 +1860,34 @@ fn cairo_prove_cached_with_columns(
     let constraint_alphas: Vec<QM31> = (0..N_CONSTRAINTS).map(|_| channel.draw_felt()).collect();
     let alpha_flat: Vec<u32> = constraint_alphas.iter().flat_map(|a| a.to_u32_array()).collect();
 
-    // Use GPU-resident hc-natural buffers built at commit time (via
-    // cuda_permute_canonic_brt_to_hc_natural) — no re-upload.
+    // Use GPU-resident hc-natural buffers when commit-time fit allows
+    // (keep_hc_resident in ntt_blind_commit above). When log_eval_size
+    // pushed the 34-col resident footprint past the VRAM budget, the
+    // `d_eval_*_hc` vecs are empty — rebuild here from `host_eval_cols`
+    // (canonic-BRT) via a pinned H2D + GPU permute to hc-natural.
     let mut d_quot_cols: Vec<DeviceBuffer<u32>> = Vec::with_capacity(N_COLS);
-    d_quot_cols.extend(d_eval_lo_hc);
-    d_quot_cols.extend(d_eval_hi_hc);
-    d_quot_cols.extend(d_eval_dict_hc);
+    if !d_eval_lo_hc.is_empty() {
+        d_quot_cols.extend(d_eval_lo_hc);
+        d_quot_cols.extend(d_eval_hi_hc);
+        d_quot_cols.extend(d_eval_dict_hc);
+    } else {
+        // Rebuild 34 hc-natural GPU buffers from the canonic-BRT host
+        // snapshot. Upload → GPU permute in place via a scratch buffer.
+        d_quot_cols.reserve(N_COLS);
+        for c in 0..N_COLS {
+            let d_src = DeviceBuffer::<u32>::from_host_chunked(&host_eval_cols[c]);
+            let mut d_hc = DeviceBuffer::<u32>::alloc(eval_size);
+            unsafe {
+                ffi::cuda_permute_canonic_brt_to_hc_natural(
+                    d_src.as_ptr(), d_hc.as_mut_ptr(),
+                    eval_size as u32, log_eval_size,
+                );
+            }
+            drop(d_src);
+            d_quot_cols.push(d_hc);
+        }
+        unsafe { ffi::cuda_device_sync(); }
+    }
     let col_ptrs: Vec<*const u32> = d_quot_cols.iter().map(|b| b.as_ptr()).collect();
     let d_col_ptrs = DeviceBuffer::from_host(&col_ptrs);
     let d_alpha = DeviceBuffer::from_host(&alpha_flat);
