@@ -2938,6 +2938,12 @@ pub fn cairo_verify(proof: &CairoProof) -> Result<(), String> {
     if log_n > 32 {
         return Err(format!("log_trace_size {log_n} exceeds sanity cap 32"));
     }
+    // Also bound from below: the FRI protocol requires log_eval_size > committed_stop_log
+    // (=3) for there to be at least 1 fold layer. log_n < 2 would produce
+    // log_eval_size < 4 and a degenerate proof. Honest proofs use log_n >= 5.
+    if log_n < 3 {
+        return Err(format!("log_trace_size {log_n} below minimum 3 (FRI needs room to fold)"));
+    }
     let log_eval_size = log_n + BLOWUP_BITS;
     let eval_size = 1usize << log_eval_size;
 
