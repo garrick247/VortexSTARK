@@ -3703,8 +3703,27 @@ pub fn cairo_verify(proof: &CairoProof) -> Result<(), String> {
         || proof.trace_auth_paths_hi.len() != n_q || proof.trace_auth_paths_hi_next.len() != n_q {
         return Err("trace auth path length mismatch".into());
     }
-    if proof.trace_commitment_hi == [0u32; 8] {
-        return Err("trace_commitment_hi is zero".into());
+    if proof.trace_auth_paths_dict.len() != n_q || proof.trace_auth_paths_dict_next.len() != n_q {
+        return Err("dict trace auth path length mismatch".into());
+    }
+    if proof.trace_values_at_queries.len() != n_q || proof.trace_values_at_queries_next.len() != n_q {
+        return Err(format!("trace_values_at_queries length mismatch: expected {n_q}, got {} / {}",
+            proof.trace_values_at_queries.len(), proof.trace_values_at_queries_next.len()));
+    }
+    // Each trace_values_at_queries[q] must have N_COLS columns so the
+    // slice operations [..TRACE_LO], [TRACE_LO..TRACE_VM_END], [TRACE_VM_END..]
+    // don't panic.
+    for (q, row) in proof.trace_values_at_queries.iter().enumerate() {
+        if row.len() != N_COLS {
+            return Err(format!("trace_values_at_queries[{q}] has {} cols, expected {N_COLS}",
+                row.len()));
+        }
+    }
+    for (q, row) in proof.trace_values_at_queries_next.iter().enumerate() {
+        if row.len() != N_COLS {
+            return Err(format!("trace_values_at_queries_next[{q}] has {} cols, expected {N_COLS}",
+                row.len()));
+        }
     }
     for (q, &qi) in proof.query_indices.iter().enumerate() {
         let qi_next = canonic_next(qi, log_eval_size);
