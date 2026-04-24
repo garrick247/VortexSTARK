@@ -2998,6 +2998,59 @@ pub fn cairo_verify(proof: &CairoProof) -> Result<(), String> {
             proof.fri_last_layer.len()));
     }
 
+    // ---- Cheap non-trivial-commitment gates ----
+    // A zero commitment is a trivial/invalid Merkle root. Rejecting one
+    // weakens the Fiat-Shamir channel (predictable digests → predictable
+    // challenges). Catching these here is an O(1) gate before any
+    // expensive Merkle / Blake2s / OODS recompute fires.
+    if proof.trace_commitment == [0; 8] {
+        return Err("Trace commitment is zero".into());
+    }
+    if proof.trace_commitment_hi == [0; 8] {
+        return Err("Trace commitment (hi) is zero".into());
+    }
+    if proof.dict_trace_commitment == [0; 8] {
+        return Err("Dict trace commitment is zero".into());
+    }
+    if proof.quotient_commitment == [0; 8] {
+        return Err("Quotient commitment is zero".into());
+    }
+    if proof.interaction_commitment == [0; 8] {
+        return Err("Interaction commitment is zero".into());
+    }
+    if proof.oods_quotient_commitment == [0; 8] {
+        return Err("OODS quotient commitment is zero".into());
+    }
+    if proof.memory_table_commitment == [0; 8] {
+        return Err("Memory table commitment is zero".into());
+    }
+    if proof.rc_counts_commitment == [0; 8] {
+        return Err("RC counts commitment is zero".into());
+    }
+    if proof.dict_main_interaction_commitment == [0; 8] {
+        return Err("Dict main interaction commitment is zero".into());
+    }
+    if let Some(c) = proof.bitwise_commitment {
+        if c == [0; 8] {
+            return Err("Bitwise commitment is zero".into());
+        }
+    }
+    if let Some(c) = proof.ec_trace_commitment {
+        if c == [0; 8] {
+            return Err("EC trace commitment is zero".into());
+        }
+    }
+    if let Some(c) = proof.ec_trace_commitment_hi {
+        if c == [0; 8] {
+            return Err("EC trace commitment (hi) is zero".into());
+        }
+    }
+    for (i, c) in proof.fri_commitments.iter().enumerate() {
+        if *c == [0; 8] {
+            return Err(format!("FRI commitment at layer {i} is zero"));
+        }
+    }
+
     // Independently recompute program_hash from the bytecode carried in
     // public_inputs and reject any mismatch. This closes the prior
     // "caller's responsibility" gap — the verifier now binds the proof
@@ -3536,16 +3589,8 @@ pub fn cairo_verify(proof: &CairoProof) -> Result<(), String> {
         return Err("Query indices don't match Fiat-Shamir derivation".into());
     }
 
-    // ---- Verify non-trivial commitments ----
-    if proof.trace_commitment == [0; 8] {
-        return Err("Trace commitment is zero".into());
-    }
-    if proof.quotient_commitment == [0; 8] {
-        return Err("Quotient commitment is zero".into());
-    }
-    if proof.interaction_commitment == [0; 8] {
-        return Err("Interaction commitment is zero".into());
-    }
+    // Non-trivial-commitment gates moved to the top of cairo_verify for
+    // cheap early rejection — see the DoS gate block above.
 
     // ---- Verify FRI fold equations ----
     for (q, &qi) in proof.query_indices.iter().enumerate() {
@@ -4749,6 +4794,26 @@ mod tests {
         proof.public_inputs.program = vec![0; 1024];
         let err = cairo_verify(&proof).expect_err("oversized program must be rejected");
         assert!(err.contains("program length"), "error: {err}");
+    }
+
+    #[test]
+    fn test_verifier_rejects_zero_memory_table_commitment() {
+        ffi::init_memory_pool();
+        let program = build_fib_program(64);
+        let mut proof = cairo_prove(&program, 64, 6);
+        proof.memory_table_commitment = [0u32; 8];
+        let err = cairo_verify(&proof).expect_err("zero commitment must be rejected");
+        assert!(err.contains("Memory table commitment is zero"), "error: {err}");
+    }
+
+    #[test]
+    fn test_verifier_rejects_zero_trace_commitment_hi() {
+        ffi::init_memory_pool();
+        let program = build_fib_program(64);
+        let mut proof = cairo_prove(&program, 64, 6);
+        proof.trace_commitment_hi = [0u32; 8];
+        let err = cairo_verify(&proof).expect_err("zero trace_hi commitment must be rejected");
+        assert!(err.contains("hi") && err.contains("zero"), "error: {err}");
     }
 
     #[test]
