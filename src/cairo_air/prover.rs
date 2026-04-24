@@ -2403,23 +2403,34 @@ fn cairo_prove_cached_with_columns(
         oods_tag("phase2b_mix_and_line_coeffs");
 
         // ── Phase 2c: upload eval-domain columns; compute OODS numerators ────
-        // Upload trace eval cols + re-use q0..q3 GPU buffers by reference.
-        // cols 0..N_COLS = trace, cols N_COLS..N_COLS+4 = quotient q0..q3
-        let mut d_eval_cols: Vec<DeviceBuffer<u32>> = host_eval_cols.iter()
+        // Uploaded: trace eval cols (H→D, unavoidable at current VRAM budget)
+        //           + quotient q0..q3 (H→D, VRAM-budget tradeoff).
+        // Re-used by pointer (zero-copy):
+        //           - 12 interaction eval cols (6 GB D→D clone eliminated —
+        //             at log_n=25 the previous `clone_on_device` loop copied
+        //             12 × 128M × 4B of interaction eval data for no reason;
+        //             the kernel only reads through col_ptrs, which can
+        //             point directly at the live d_interaction_eval buffers).
+        // cols 0..N_COLS = trace, cols N_COLS..N_COLS+4 = quotient q0..q3,
+        // cols N_COLS+4..N_COLS+16 = 12 interaction cols (3 interactions × 4).
+        let d_eval_cols: Vec<DeviceBuffer<u32>> = host_eval_cols.iter()
             .map(|c| DeviceBuffer::from_host(c)).collect();
-        d_eval_cols.push(DeviceBuffer::from_host(&host_q0));
-        d_eval_cols.push(DeviceBuffer::from_host(&host_q1));
-        d_eval_cols.push(DeviceBuffer::from_host(&host_q2));
-        d_eval_cols.push(DeviceBuffer::from_host(&host_q3));
-        // Interaction columns: reuse the already-uploaded eval-domain GPU buffers from Phase 1.5
-        // (avoids 12 redundant H→D uploads — d_interaction_eval[pi][k] still contains eval data).
+        let d_q0 = DeviceBuffer::from_host(&host_q0);
+        let d_q1 = DeviceBuffer::from_host(&host_q1);
+        let d_q2 = DeviceBuffer::from_host(&host_q2);
+        let d_q3 = DeviceBuffer::from_host(&host_q3);
+
+        let mut all_col_ptrs: Vec<*const u32> = Vec::with_capacity(N_COLS + 4 + 12);
+        all_col_ptrs.extend(d_eval_cols.iter().map(|b| b.as_ptr()));
+        all_col_ptrs.push(d_q0.as_ptr());
+        all_col_ptrs.push(d_q1.as_ptr());
+        all_col_ptrs.push(d_q2.as_ptr());
+        all_col_ptrs.push(d_q3.as_ptr());
         for pi in 0..3 {
             for k in 0..4 {
-                d_eval_cols.push(d_interaction_eval[pi][k].clone_on_device());
+                all_col_ptrs.push(d_interaction_eval[pi][k].as_ptr());
             }
         }
-
-        let all_col_ptrs: Vec<*const u32> = d_eval_cols.iter().map(|b| b.as_ptr()).collect();
         let d_col_ptrs = DeviceBuffer::from_host(&all_col_ptrs);
 
         let col_idx_z: Vec<u32> = (0..(N_COLS + 4 + 12) as u32).collect();
@@ -2471,6 +2482,7 @@ fn cairo_prove_cached_with_columns(
         }
         drop(d_zn_coeff_idx);
         drop(d_eval_cols); drop(d_col_ptrs);
+        drop(d_q0); drop(d_q1); drop(d_q2); drop(d_q3);
         drop(d_cidx_z); drop(d_b_z); drop(d_c_z);
         drop(d_cidx_zn); drop(d_b_zn); drop(d_c_zn);
         drop(d_interaction_eval); // eval-domain interaction GPU buffers no longer needed

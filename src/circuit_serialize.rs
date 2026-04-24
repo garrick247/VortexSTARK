@@ -361,13 +361,14 @@ mod tests {
     }
 
     #[test]
+    #[cfg(debug_assertions)]
     #[should_panic(expected = "M31 out of range")]
     fn m31_rejects_out_of_range_digest_word() {
-        // Simulate a raw Blake2s digest word with bit 31 set.
-        // If we allowed it, the upstream deserializer would also reject.
+        // Simulate a raw Blake2s digest word with bit 31 set. If we
+        // allowed it, the upstream deserializer would also reject.
+        // The guard is a `debug_assert!` (hot-path-free in release),
+        // so this contract is only checkable in debug builds.
         let mut out = Vec::new();
-        // Construct by bypass of constructor — skip debug_assert and use
-        // the unchecked form, but then serialize() must still panic.
         let bad = M31(0x8000_0001);
         bad.serialize(&mut out);
     }
