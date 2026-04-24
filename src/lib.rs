@@ -17,3 +17,4 @@ pub mod verifier;
 pub mod oods;
 pub mod stark252;
 pub mod stwo_export;
+pub mod snip36;

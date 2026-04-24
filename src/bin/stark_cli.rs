@@ -195,6 +195,37 @@ enum Commands {
         /// Log2 of trace size
         log_n: u32,
     },
+
+    /// Build a SNIP-36 (Shinobi) Invoke V3 transaction JSON from a proof file.
+    ///
+    /// Emits a JSON payload ready to POST to the Starknet gateway / submit
+    /// via starknet.js. The proof bytes go in `proof`; public facts
+    /// (version, program_hash, initial_pc, initial_ap, n_steps) go in
+    /// `proof_facts`, readable by contracts via `get_execution_info_v3`.
+    ///
+    /// NOTE: the `proof` encoding is currently a placeholder (JSON bytes
+    /// packed as u32 LE). Must be cross-validated against Starknet's
+    /// actual S-Two verifier before mainnet submission.
+    BuildSnip36Tx {
+        /// Path to a VortexSTARK proof.bin (from `prove-file`)
+        #[arg(long)]
+        proof: String,
+        /// Sender account address (felt252 hex, e.g. 0x1234abcd...)
+        #[arg(long)]
+        sender_address: String,
+        /// Entry point selector (felt252 hex)
+        #[arg(long)]
+        entry_point_selector: String,
+        /// Calldata as space-separated felt252 hex values
+        #[arg(long, default_value = "")]
+        calldata: String,
+        /// Account nonce (felt252 hex)
+        #[arg(long, default_value = "0x0")]
+        nonce: String,
+        /// Output path for the Invoke V3 JSON
+        #[arg(short, long, default_value = "snip36_tx.json")]
+        output: String,
+    },
 }
 
 fn main() {
@@ -233,7 +264,62 @@ fn main() {
         }
         Commands::Verify { proof } => cmd_verify(&proof),
         Commands::Bench { log_n } => cmd_bench(log_n),
+        Commands::BuildSnip36Tx {
+            proof, sender_address, entry_point_selector, calldata, nonce, output
+        } => cmd_build_snip36_tx(
+            &proof, &sender_address, &entry_point_selector, &calldata, &nonce, &output
+        ),
     }
+}
+
+fn cmd_build_snip36_tx(
+    proof_path: &str,
+    sender_address: &str,
+    entry_point_selector: &str,
+    calldata_str: &str,
+    nonce: &str,
+    output: &str,
+) {
+    use vortexstark::cairo_air::prover::CairoProof;
+    let bytes = std::fs::read(proof_path)
+        .unwrap_or_else(|e| { eprintln!("ERROR reading {proof_path}: {e}"); std::process::exit(1) });
+    // Accept either binary bincode (from prove-file) or JSON.
+    let proof: CairoProof = if bytes.starts_with(b"{") {
+        serde_json::from_slice(&bytes)
+            .unwrap_or_else(|e| { eprintln!("ERROR parsing JSON proof: {e}"); std::process::exit(1) })
+    } else {
+        deserialize_cairo_proof(&bytes)
+    };
+    let bundle = vortexstark::snip36::to_snip36_bundle(&proof);
+    let calldata_hex: Vec<String> = calldata_str
+        .split_whitespace()
+        .filter(|s| !s.is_empty())
+        .map(|s| s.to_string())
+        .collect();
+    // Default resource_bounds — caller can edit before broadcast.
+    let resource_bounds = serde_json::json!({
+        "l1_gas":        { "max_amount": "0x0", "max_price_per_unit": "0x0" },
+        "l1_data_gas":   { "max_amount": "0x0", "max_price_per_unit": "0x0" },
+        "l2_gas":        { "max_amount": "0x10000000", "max_price_per_unit": "0x1" },
+    });
+    let tx = vortexstark::snip36::build_invoke_v3_tx(
+        &bundle,
+        sender_address,
+        entry_point_selector,
+        &calldata_hex,
+        nonce,
+        &resource_bounds,
+    );
+    let json = serde_json::to_string_pretty(&tx).expect("serialize tx");
+    std::fs::write(output, &json)
+        .unwrap_or_else(|e| { eprintln!("ERROR writing {output}: {e}"); std::process::exit(1) });
+    eprintln!("SNIP-36 Invoke V3 tx: {} bytes → {output}", json.len());
+    eprintln!("  proof array:  {} u32 words", bundle.proof.len());
+    eprintln!("  proof_facts:  {} felts", bundle.proof_facts.len());
+    eprintln!("WARNING: proof encoding is a placeholder until cross-validated");
+    eprintln!("         against Starknet's S-Two verifier. Do NOT submit this");
+    eprintln!("         payload to mainnet without verifying acceptance on a");
+    eprintln!("         testnet or devnet endpoint first.");
 }
 
 fn cmd_prove(log_n: u32, a: u32, b: u32, output: &str) {
