@@ -1232,21 +1232,28 @@ fn cairo_prove_cached_with_columns(
     }
     let [d_sdict0, d_sdict1, d_sdict2, d_sdict3] = d_sdict_gpu;
 
-    let (dict_main_interaction_commitment, tile_roots_sdict, host_sdict, host_sdict_hc) = {
-        // Stwo output is BRT-canonic. Inverse permute for constraint kernel.
-        // Commit directly from the GPU-resident d_sdict* buffers — saves a
-        // 4-col eval-domain H->D round-trip.
+    let (dict_main_interaction_commitment, tile_roots_sdict, host_sdict, d_sdict_hc) = {
+        // GPU-resident hc: same pattern as logup/rc commits. Avoids
+        // 4 × eval_size H→D→H→D round-trip (2 GB at log_n=25).
         let cn = [d_sdict0.to_host(), d_sdict1.to_host(), d_sdict2.to_host(), d_sdict3.to_host()];
-        let hc: [Vec<u32>; 4] = {
-            use rayon::prelude::*;
-            let vs: Vec<Vec<u32>> = (0..4usize).into_par_iter()
-                .map(|i| Coset::permute_canonic_brt_to_hc_natural(&cn[i], log_eval_size))
-                .collect();
-            vs.try_into().expect("par_iter produced exactly 4 elements")
+        let permute = |d_in: &DeviceBuffer<u32>| -> DeviceBuffer<u32> {
+            let mut out = DeviceBuffer::<u32>::alloc(eval_size);
+            unsafe {
+                ffi::cuda_permute_canonic_brt_to_hc_natural(
+                    d_in.as_ptr(), out.as_mut_ptr(),
+                    eval_size as u32, log_eval_size,
+                );
+            }
+            out
         };
+        let d_hc: [DeviceBuffer<u32>; 4] = [
+            permute(&d_sdict0), permute(&d_sdict1),
+            permute(&d_sdict2), permute(&d_sdict3),
+        ];
+        unsafe { ffi::cuda_device_sync(); }
         let (root, tiles) = MerkleTree::commit_root_soa4_with_subtrees(&d_sdict0, &d_sdict1, &d_sdict2, &d_sdict3, log_eval_size);
         drop(d_sdict0); drop(d_sdict1); drop(d_sdict2); drop(d_sdict3);
-        (root, tiles, cn, hc)
+        (root, tiles, cn, d_hc)
     };
     channel.mix_digest(&dict_main_interaction_commitment);
     channel.mix_digest(&[
@@ -1892,10 +1899,7 @@ fn cairo_prove_cached_with_columns(
     // (see `host_sdict_hc` allocation) so it still needs uploading.
     let [d_slogup0, d_slogup1, d_slogup2, d_slogup3] = d_logup_hc;
     let [d_src0, d_src1, d_src2, d_src3] = d_rc_logup_hc;
-    let d_sd0 = DeviceBuffer::from_host(&host_sdict_hc[0]);
-    let d_sd1 = DeviceBuffer::from_host(&host_sdict_hc[1]);
-    let d_sd2 = DeviceBuffer::from_host(&host_sdict_hc[2]);
-    let d_sd3 = DeviceBuffer::from_host(&host_sdict_hc[3]);
+    let [d_sd0, d_sd1, d_sd2, d_sd3] = d_sdict_hc;
     // T/U intermediate columns — already GPU-resident from commit phase.
     // Move out of d_*_hc (consumed here; no further use after the kernel call).
     let dt1 = d_t1_hc;
