@@ -2293,14 +2293,24 @@ fn cairo_prove_cached_with_columns(
         // ── Phase 2a: evaluate AIR quotient columns at z ─────────────────────
         // q0..q3 are natural order → permute to BRT-canonic → stwo INTT → eval_at_oods.
         // Quotient has degree ~2n, use ALL eval-domain coefficients.
+        //
+        // Previous version did three H↔D transfers per column (natural→host,
+        // canonic→device, coeffs→host) with a CPU-side permute between the
+        // first two. At log_n=25 that's 6 × 512 MB of transfer per column × 4 =
+        // ~12 GB of redundant traffic. Now: GPU permute in place, one
+        // download of the coefficient output.
         let quot_at_z: [QM31; 4] = {
             let qs: [&DeviceBuffer<u32>; 4] = [&q0, &q1, &q2, &q3];
             std::array::from_fn(|k| {
-                let natural = qs[k].to_host();
-                let canonic = permute_half_coset_to_canonic(&natural, log_eval_size);
-                let mut d = DeviceBuffer::from_host(&canonic);
-                ntt::interpolate_stwo(&mut d, &cache.stwo_eval_ntt);
-                let coeffs = d.to_host();
+                let mut d_canonic = DeviceBuffer::<u32>::alloc(eval_size);
+                unsafe {
+                    ffi::cuda_permute_hc_to_canonic_brt(
+                        qs[k].as_ptr(), d_canonic.as_mut_ptr(),
+                        eval_size as u32, log_eval_size,
+                    );
+                }
+                ntt::interpolate_stwo(&mut d_canonic, &cache.stwo_eval_ntt);
+                let coeffs = d_canonic.to_host();
                 eval_at_oods_from_coeffs(&coeffs, z)
             })
         };
