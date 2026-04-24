@@ -727,23 +727,49 @@ bytecode, not an arbitrary value. But a program's bytecode may contain
 multiple valid entry points, allowing a prover to "claim" one entry
 while actually running another.
 
-**Fix plan:** Add a boundary constraint to the composition polynomial.
-```
-Q_boundary_pc(x) = (T_PC(x) - initial_pc) / (x - p_0)
-Q_boundary_ap(x) = (T_AP(x) - initial_ap) / (x - p_0)
-```
-where `p_0` is the first trace-domain point. `Q_boundary_*(x)` is a
-polynomial iff `T_PC(p_0) = initial_pc` (resp. `T_AP(p_0) = initial_ap`).
-Implementation:
-1. Add two challenge alphas for the new constraints (mixed from FS channel).
-2. Extend the GPU quotient kernel (`cuda/constraints.cu`) to evaluate
-   `Q_boundary_pc` and `Q_boundary_ap` at every eval-domain point and
-   add them to the composition polynomial with their alphas.
-3. Extend the verifier's OODS check to include the two new terms:
-   at the OODS point `z`, verify the composition includes
-   `alpha_bp * (T_PC_oods - initial_pc) / (z - p_0) + alpha_bap * (T_AP_oods - initial_ap) / (z - p_0)`.
+**Why this is more than "~150 lines" (2026-04-23 deep dive):** Circle STARKs
+have different boundary-constraint machinery than univariate STARKs.
 
-Estimated effort: ~150 lines (kernel + verifier OODS + FS mixing).
+- Trace-domain `half_coset(log_n)` and eval-domain `half_coset(log_eval_size)`
+  are half-cosets of DIFFERENT full circle groups. Trace row 0 point
+  `G^(2^(30-log_n))` is not present in the eval domain for
+  `BLOWUP_BITS=2`, so a simple Merkle auth path at an eval index
+  cannot extract `T_PC(p_0)` directly. Empirically confirmed —
+  `host_eval_cols[COL_PC][0] != trace_row_0_pc`.
+- stwo's OODS quotient uses line polynomials through `(z.y, v)` and
+  `(conj(z.y), conj(v))` with denominator `z.y - conj(z.y)`. For a
+  random QM31 OODS point this is a fine generic formula. For an M31
+  boundary point `p_0` lifted to QM31, `z.y` is self-conjugate, so the
+  denominator is zero — `compute_line_coeffs` returns `NaN`. Stwo's
+  existing machinery does not handle M31 sample points.
+- The naive univariate divisor `(x - p_0.x)` is NOT a valid quotient
+  denominator on the circle: a polynomial on the circle vanishes at
+  `(p_0.x, p_0.y)` iff it vanishes at BOTH `p_0` AND its circle-inverse
+  `p_0.conj = (p_0.x, -p_0.y)`. For `half_coset(log_n)`, the conjugate
+  of the first trace point is the LAST trace point (`at(N-1)`), so a
+  naive `(x - p_0.x)` divisor would enforce `T_PC[0] == T_PC[N-1]`,
+  which is usually wrong.
+- The correct approach is either:
+  (a) Add two paired boundary constraints `T_PC(p_0) = initial_pc` and
+      `T_PC(p_0.conj) = prover_claimed_value`, with the second becoming
+      a new public input that the caller must separately verify.
+  (b) Use bivariate vanishing via the ideal `(x - p_0.x, y - p_0.y)`,
+      which cannot be expressed as a single quotient denominator and
+      requires two separate quotient columns fused with a Schwartz-Zippel
+      argument.
+  (c) Introduce the stwo `PointSample` mechanism's generalization to
+      M31 points — not present in stwo 0.1.x as of this writing.
+
+**Fix plan:** This is a 1–2 week focused implementation requiring
+either (a) a new public-input scheme including `T_PC[N-1]` / `T_AP[N-1]`
+final-state values, or (b) a dual-quotient construction with
+Schwartz-Zippel. Both need careful soundness review. The boundary
+constraint for VortexSTARK is blocked on this design decision, not on
+"just coding".
+
+Estimated effort (revised): 1–2 weeks of focused circle-STARK work,
+including cross-validation against stwo's master branch once stwo adds
+boundary-constraint machinery.
 
 ### R2. Dict memory bus link (CLOSED 2026-04-23)
 
