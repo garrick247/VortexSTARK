@@ -1715,28 +1715,38 @@ fn cairo_prove_cached_with_columns(
     let ntt_qm31 = |data: &[Vec<u32>; 4]| -> [DeviceBuffer<u32>; 4] {
         std::array::from_fn(|c| stwo_ntt_lde(DeviceBuffer::from_host(&data[c])))
     };
-    let commit_qm31 = |d: [DeviceBuffer<u32>; 4]| -> ([u32; 8], Vec<[u32; 8]>, [Vec<u32>; 4], [Vec<u32>; 4]) {
+    // Keep the hc-natural GPU buffers alive after commit — the quotient
+    // phase consumes them, and re-uploading via host Vec was a 5×4×eval_size
+    // H→D round-trip (16 GB at log_n=25). The `cn` host copy is still
+    // needed for the later decommit (`logup_t{1,2,3}_decom`, `rc_u{1,2}_decom`).
+    let commit_qm31_keep_hc = |d: [DeviceBuffer<u32>; 4]| -> (
+        [u32; 8], Vec<[u32; 8]>, [Vec<u32>; 4], [DeviceBuffer<u32>; 4]
+    ) {
         let cn: [Vec<u32>; 4] = std::array::from_fn(|i| d[i].to_host());
-        let hc: [Vec<u32>; 4] = {
-            use rayon::prelude::*;
-            let vs: Vec<Vec<u32>> = (0..4usize).into_par_iter()
-                .map(|i| Coset::permute_canonic_brt_to_hc_natural(&cn[i], log_eval_size))
-                .collect();
-            vs.try_into().expect("par_iter produced exactly 4 elements")
-        };
-        // Commit directly from the GPU-resident buffers instead of re-uploading `cn`.
+        // GPU permute: canonic-BRT → hc-natural on device, no H→D round trip.
+        let d_hc: [DeviceBuffer<u32>; 4] = std::array::from_fn(|i| {
+            let mut out = DeviceBuffer::<u32>::alloc(eval_size);
+            unsafe {
+                ffi::cuda_permute_canonic_brt_to_hc_natural(
+                    d[i].as_ptr(), out.as_mut_ptr(),
+                    eval_size as u32, log_eval_size,
+                );
+            }
+            out
+        });
+        unsafe { ffi::cuda_device_sync(); }
         let (root, tiles) = MerkleTree::commit_root_soa4_with_subtrees(&d[0], &d[1], &d[2], &d[3], log_eval_size);
-        (root, tiles, cn, hc)
+        (root, tiles, cn, d_hc)
     };
-    let (logup_t1_commitment, _tr_t1, _cn_t1, host_t1_hc) = commit_qm31(ntt_qm31(&logup_t1_trace));
+    let (logup_t1_commitment, _tr_t1, _cn_t1, d_t1_hc) = commit_qm31_keep_hc(ntt_qm31(&logup_t1_trace));
     channel.mix_digest(&logup_t1_commitment);
-    let (logup_t2_commitment, _tr_t2, _cn_t2, host_t2_hc) = commit_qm31(ntt_qm31(&logup_t2_trace));
+    let (logup_t2_commitment, _tr_t2, _cn_t2, d_t2_hc) = commit_qm31_keep_hc(ntt_qm31(&logup_t2_trace));
     channel.mix_digest(&logup_t2_commitment);
-    let (logup_t3_commitment, _tr_t3, _cn_t3, host_t3_hc) = commit_qm31(ntt_qm31(&logup_t3_trace));
+    let (logup_t3_commitment, _tr_t3, _cn_t3, d_t3_hc) = commit_qm31_keep_hc(ntt_qm31(&logup_t3_trace));
     channel.mix_digest(&logup_t3_commitment);
-    let (rc_u1_commitment, _tr_u1, _cn_u1, host_u1_hc) = commit_qm31(ntt_qm31(&rc_u1_trace));
+    let (rc_u1_commitment, _tr_u1, _cn_u1, d_u1_hc) = commit_qm31_keep_hc(ntt_qm31(&rc_u1_trace));
     channel.mix_digest(&rc_u1_commitment);
-    let (rc_u2_commitment, _tr_u2, _cn_u2, host_u2_hc) = commit_qm31(ntt_qm31(&rc_u2_trace));
+    let (rc_u2_commitment, _tr_u2, _cn_u2, d_u2_hc) = commit_qm31_keep_hc(ntt_qm31(&rc_u2_trace));
     channel.mix_digest(&rc_u2_commitment);
 
     // Bind LogUp and RC final sums into Fiat-Shamir (tampering breaks FRI)
@@ -1792,6 +1802,18 @@ fn cairo_prove_cached_with_columns(
     phase_tag("rc_counts_commit");
 
     // ---- Phase 3: Quotient ----
+    let q3_start = std::time::Instant::now();
+    let mut q3_last = q3_start;
+    let mut q3_tag = |label: &str| {
+        if profile {
+            let now = std::time::Instant::now();
+            eprintln!(
+                "    [q3] {label:<28} {:>7.1}ms",
+                now.duration_since(q3_last).as_secs_f64() * 1000.0,
+            );
+            q3_last = now;
+        }
+    };
     let constraint_alphas: Vec<QM31> = (0..N_CONSTRAINTS).map(|_| channel.draw_felt()).collect();
     let alpha_flat: Vec<u32> = constraint_alphas.iter().flat_map(|a| a.to_u32_array()).collect();
 
@@ -1821,6 +1843,7 @@ fn cairo_prove_cached_with_columns(
         }).collect();
         DeviceBuffer::from_host(&vh_inv_vals)
     };
+    q3_tag("vh_inv_compute");
 
     // Compute trans_factor[i] = (y_eval_i - y_trace_last) in M31.
     //
@@ -1850,6 +1873,7 @@ fn cairo_prove_cached_with_columns(
         }).collect();
         DeviceBuffer::from_host(&tf)
     };
+    q3_tag("trans_factor_compute");
 
     // Upload interaction columns + T/U intermediate columns for constraint kernel.
     let d_slogup0 = DeviceBuffer::from_host(&host_logup_hc[0]);
@@ -1864,12 +1888,14 @@ fn cairo_prove_cached_with_columns(
     let d_sd1 = DeviceBuffer::from_host(&host_sdict_hc[1]);
     let d_sd2 = DeviceBuffer::from_host(&host_sdict_hc[2]);
     let d_sd3 = DeviceBuffer::from_host(&host_sdict_hc[3]);
-    // T/U intermediate columns for constraint kernel.
-    let dt1: [DeviceBuffer<u32>; 4] = std::array::from_fn(|c| DeviceBuffer::from_host(&host_t1_hc[c]));
-    let dt2: [DeviceBuffer<u32>; 4] = std::array::from_fn(|c| DeviceBuffer::from_host(&host_t2_hc[c]));
-    let dt3: [DeviceBuffer<u32>; 4] = std::array::from_fn(|c| DeviceBuffer::from_host(&host_t3_hc[c]));
-    let du1: [DeviceBuffer<u32>; 4] = std::array::from_fn(|c| DeviceBuffer::from_host(&host_u1_hc[c]));
-    let du2: [DeviceBuffer<u32>; 4] = std::array::from_fn(|c| DeviceBuffer::from_host(&host_u2_hc[c]));
+    // T/U intermediate columns — already GPU-resident from commit phase.
+    // Move out of d_*_hc (consumed here; no further use after the kernel call).
+    let dt1 = d_t1_hc;
+    let dt2 = d_t2_hc;
+    let dt3 = d_t3_hc;
+    let du1 = d_u1_hc;
+    let du2 = d_u2_hc;
+    q3_tag("h2d_uploads_remaining");
 
     // Pack challenges: [z_mem(4), alpha_mem(4), alpha_mem_sq(4), z_rc(4), z_dict_link(4), alpha_dict_link(4)] = 24 u32s.
     let challenges_flat: Vec<u32> = z_mem.to_u32_array().iter()
@@ -1919,6 +1945,7 @@ fn cairo_prove_cached_with_columns(
     drop(d_quot_cols);
     drop(d_col_ptrs);
     drop(d_alpha);
+    q3_tag("cairo_quotient_kernel");
 
     // ── Diagnostic: check constraint quotient + trace column degree ────────
     #[cfg(test)]
@@ -2145,6 +2172,7 @@ fn cairo_prove_cached_with_columns(
         let (root, tiles) = MerkleTree::commit_root_soa4_with_subtrees(&d_hq0, &d_hq1, &d_hq2, &d_hq3, log_eval_size);
         (root, tiles, hq0, hq1, hq2, hq3)
     };
+    q3_tag("quotient_permute_commit");
     channel.mix_digest(&quotient_commitment);
 
     phase_tag("phase3_quotient");
