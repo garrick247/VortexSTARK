@@ -87,20 +87,42 @@ pub fn prewarm_eval_pool(log_n: u32) {
 /// With the `bench-max-size` feature, BLOWUP_BITS drops to 1 so that log_eval fits
 /// the M31 circle subgroup (max order 2^31) for log_n=30 benchmarks. Security drops
 /// to 80-bit; not for production use.
-#[cfg(not(feature = "bench-max-size"))]
+///
+/// With the `shinobi-compat` feature, the Circle STARK parameters (BLOWUP_BITS,
+/// POW_BITS, N_QUERIES) match Starknet's Shinobi (v0.14.2) hardcoded Cairo
+/// verifier — source:
+/// `proving-utils@0305dbe/crates/privacy_circuit_verify/src/consts.rs`
+/// - `CAIRO_LOG_BLOWUP_FACTOR = 3` → BLOWUP_BITS = 3
+/// - `CAIRO_PCS_CONFIG.pow_bits = 27` → POW_BITS = 27
+/// - `CAIRO_FRI_CONFIG.n_queries = 23` → N_QUERIES = 23
+///
+/// Builds with `shinobi-compat` produce proofs whose STRUCTURE matches what
+/// the Shinobi verifier expects; the byte encoding still has to land
+/// (see `src/snip36.rs`). `shinobi-compat` is orthogonal to `bench-max-size`
+/// and takes precedence when both are set for BLOWUP_BITS (blowup=3 is a
+/// compat target, not a scale demo).
+#[cfg(feature = "shinobi-compat")]
+pub const BLOWUP_BITS: u32 = 3;
+#[cfg(all(not(feature = "shinobi-compat"), not(feature = "bench-max-size")))]
 pub const BLOWUP_BITS: u32 = 2; // blowup factor = 4 → 160-bit security (Model A/C)
-#[cfg(feature = "bench-max-size")]
+#[cfg(all(not(feature = "shinobi-compat"), feature = "bench-max-size"))]
 pub const BLOWUP_BITS: u32 = 1; // blowup factor = 2 → 80-bit security; unlocks log_n=30
 
 /// Number of queries for ~160-bit security (blowup=4, 2 bits/query).
 /// 80 queries × 2 bits/query = 160 bits (Model A/C).
+#[cfg(not(feature = "shinobi-compat"))]
 pub const N_QUERIES: usize = 80;
+#[cfg(feature = "shinobi-compat")]
+pub const N_QUERIES: usize = 23;
 
 /// Proof-of-work bits required before query indices are sampled.
 /// Prevents grinding attacks: an adversary cannot adaptively choose commitments
 /// and predict query indices without spending 2^POW_BITS hash evaluations.
 /// 26 bits costs ~5ms on RTX 5090 GPU and closes the PoW gap.
+#[cfg(not(feature = "shinobi-compat"))]
 pub const POW_BITS: u32 = 26;
+#[cfg(feature = "shinobi-compat")]
+pub const POW_BITS: u32 = 27;
 
 /// Decommitment data for a set of queries against a Merkle commitment.
 /// Includes both the queried value and its fold-sibling (index ^ 1) for

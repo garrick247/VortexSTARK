@@ -21,6 +21,10 @@ default = []
 # Security drops from 160-bit to 80-bit when this feature is active — not for
 # production use.
 bench-max-size = []
+# Match Starknet Shinobi (v0.14.2) hardcoded Cairo verifier parameters:
+# BLOWUP_BITS=3, POW_BITS=27, N_QUERIES=23. Source pinned at
+# proving-utils@0305dbe.
+shinobi-compat = []
 
 [[bin]]
 name = "vortex-bench"
