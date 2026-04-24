@@ -881,6 +881,25 @@ unsafe extern "C" {
         out3: *mut u32,
     );
 
+    /// Fused dual-sample accumulate_numerators: computes both the z-sample
+    /// and z_next-sample accumulators in a single kernel pass, reading
+    /// each M31 column value once. `zn_coeff_idx[i]` = index of
+    /// col_indices_z[i] within the z_next's coefficient arrays, or
+    /// UINT32_MAX if this column is not part of the z_next set.
+    pub fn cuda_accumulate_numerators_dual(
+        col_ptrs: *const *const u32,
+        col_indices_z: *const u32,
+        zn_coeff_idx: *const u32,
+        b_coeffs_z: *const u32,
+        c_coeffs_z: *const u32,
+        b_coeffs_zn: *const u32,
+        c_coeffs_zn: *const u32,
+        n_cols_z: u32,
+        n_rows: u32,
+        out_z0: *mut u32, out_z1: *mut u32, out_z2: *mut u32, out_z3: *mut u32,
+        out_zn0: *mut u32, out_zn1: *mut u32, out_zn2: *mut u32, out_zn3: *mut u32,
+    );
+
     /// Compute FRI quotients and combine across sample points.
     ///
     /// For each row:

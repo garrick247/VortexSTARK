@@ -2155,6 +2155,18 @@ fn cairo_prove_cached_with_columns(
     let (oods_z, oods_trace_at_z, oods_trace_at_z_next, oods_quotient_at_z, oods_alpha, oods_quotient_col, oods_interaction_at_z, oods_interaction_at_z_next) = {
         use crate::oods::{OodsPoint, eval_at_oods_from_coeffs, qm31_from_m31, oods_vanishing, compute_line_coeffs};
         use std::collections::HashMap;
+        let oods_inner_start = std::time::Instant::now();
+        let mut oods_last = oods_inner_start;
+        let mut oods_tag = |label: &str| {
+            if profile {
+                let now = std::time::Instant::now();
+                eprintln!(
+                    "    [oods] {label:<28} {:>7.1}ms",
+                    now.duration_since(oods_last).as_secs_f64() * 1000.0,
+                );
+                oods_last = now;
+            }
+        };
 
         let z = OodsPoint::from_channel(&mut channel);
         let step = crate::circle::CirclePoint::GENERATOR.repeated_double(31 - log_n);
@@ -2168,6 +2180,10 @@ fn cairo_prove_cached_with_columns(
         // Parallelized across columns — each eval_at_oods_from_coeffs is O(n) and
         // independent. At log_n >= 20 this is measurable CPU work (N_COLS × 2 × n
         // M31/QM31 ops), and the 24-core host can absorb it in parallel.
+        // The inner fold_m31 ALSO uses rayon (segmented parallel fold); nested
+        // rayon work-steals and actually yields the best throughput here — the
+        // outer 34×2=68 tasks don't saturate 24 cores evenly, so inner tasks
+        // fill in the gaps.
         use rayon::prelude::*;
         let evals: Vec<(QM31, QM31)> = (0..N_COLS).into_par_iter().map(|col_idx| {
             let coeffs = &trace_poly_coeffs[col_idx];
@@ -2183,6 +2199,7 @@ fn cairo_prove_cached_with_columns(
         let mut at_z    = Vec::with_capacity(N_COLS);
         let mut at_next = Vec::with_capacity(N_COLS);
         for (vz, vn) in evals { at_z.push(vz); at_next.push(vn); }
+        oods_tag("phase1_trace_eval_at_z");
         // ── Phase 1.5: evaluate 12 interaction polynomial components at z and z_next ──
         // 3 interaction polys (LogUp, RC, S_dict) × 4 M31 components = 12 evals each.
         // Batch strategy: upload each component once (H→D), keep eval-domain GPU buffer
@@ -2220,6 +2237,7 @@ fn cairo_prove_cached_with_columns(
             }
             (raw_z, raw_zn)
         };
+        oods_tag("phase1.5_interaction_eval");
 
         // ── Phase 2a: evaluate AIR quotient columns at z ─────────────────────
         // q0..q3 are natural order → permute to BRT-canonic → stwo INTT → eval_at_oods.
@@ -2235,6 +2253,7 @@ fn cairo_prove_cached_with_columns(
                 eval_at_oods_from_coeffs(&coeffs, z)
             })
         };
+        oods_tag("phase2a_quotient_cols");
 
         // ── Phase 2b: mix all sampled values (stwo flatten_cols order) ────────
         // stwo's channel.mix_felts(sampled_values.flatten_cols()) iterates:
@@ -2320,6 +2339,8 @@ fn cairo_prove_cached_with_columns(
             }
         }
 
+        oods_tag("phase2b_mix_and_line_coeffs");
+
         // ── Phase 2c: upload eval-domain columns; compute OODS numerators ────
         // Upload trace eval cols + re-use q0..q3 GPU buffers by reference.
         // cols 0..N_COLS = trace, cols N_COLS..N_COLS+4 = quotient q0..q3
@@ -2360,25 +2381,39 @@ fn cairo_prove_cached_with_columns(
         let mut numer_zn2 = DeviceBuffer::<u32>::alloc(eval_size);
         let mut numer_zn3 = DeviceBuffer::<u32>::alloc(eval_size);
 
+        // Build zn_coeff_idx: for each column in col_idx_z, find its index
+        // within col_idx_zn (or UINT32_MAX if absent). This lets the fused
+        // dual kernel read each M31 column value ONCE instead of twice.
+        let zn_coeff_idx: Vec<u32> = {
+            use std::collections::HashMap;
+            let mut zn_map: HashMap<u32, u32> = HashMap::with_capacity(col_idx_zn.len());
+            for (i, &ci) in col_idx_zn.iter().enumerate() {
+                zn_map.insert(ci, i as u32);
+            }
+            col_idx_z.iter().map(|ci| zn_map.get(ci).copied().unwrap_or(u32::MAX)).collect()
+        };
+        let d_zn_coeff_idx = DeviceBuffer::from_host(&zn_coeff_idx);
+
         unsafe {
-            ffi::cuda_accumulate_numerators(
-                d_col_ptrs.as_ptr() as *const *const u32, d_cidx_z.as_ptr(),
-                d_b_z.as_ptr(), d_c_z.as_ptr(), n_acc_z as u32, eval_size as u32,
+            ffi::cuda_accumulate_numerators_dual(
+                d_col_ptrs.as_ptr() as *const *const u32,
+                d_cidx_z.as_ptr(), d_zn_coeff_idx.as_ptr(),
+                d_b_z.as_ptr(), d_c_z.as_ptr(),
+                d_b_zn.as_ptr(), d_c_zn.as_ptr(),
+                n_acc_z as u32, eval_size as u32,
                 numer_z0.as_mut_ptr(), numer_z1.as_mut_ptr(),
                 numer_z2.as_mut_ptr(), numer_z3.as_mut_ptr(),
-            );
-            ffi::cuda_accumulate_numerators(
-                d_col_ptrs.as_ptr() as *const *const u32, d_cidx_zn.as_ptr(),
-                d_b_zn.as_ptr(), d_c_zn.as_ptr(), n_acc_zn as u32, eval_size as u32,
                 numer_zn0.as_mut_ptr(), numer_zn1.as_mut_ptr(),
                 numer_zn2.as_mut_ptr(), numer_zn3.as_mut_ptr(),
             );
             ffi::cuda_device_sync();
         }
+        drop(d_zn_coeff_idx);
         drop(d_eval_cols); drop(d_col_ptrs);
         drop(d_cidx_z); drop(d_b_z); drop(d_c_z);
         drop(d_cidx_zn); drop(d_b_zn); drop(d_c_zn);
         drop(d_interaction_eval); // eval-domain interaction GPU buffers no longer needed
+        oods_tag("phase2c_accumulate_numerators");
 
         // ── Phase 2d: compute domain points; combine into OODS quotient ──────
         // BRT-canonic domain points (matching the BRT-canonic-ordered d_eval_cols).
@@ -2445,6 +2480,7 @@ fn cairo_prove_cached_with_columns(
         let oods_q_arr: [[u32; 4]; 4]  = std::array::from_fn(|k| quot_at_z[k].to_u32_array());
         let alpha_arr  = oods_alpha.to_u32_array();
         let oods_col   = SecureColumn { cols: [oods_q0, oods_q1, oods_q2, oods_q3], len: eval_size };
+        oods_tag("phase2d_combine_quotient");
         (z_arr, at_z_arr, at_next_arr, oods_q_arr, alpha_arr, oods_col, interaction_evals_raw, interaction_evals_next_raw)
     };
 

@@ -68,6 +68,96 @@ __global__ void accumulate_numerators_kernel(
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
+//  accumulate_numerators_dual kernel
+// ═══════════════════════════════════════════════════════════════════════════
+//
+// Fused version of accumulate_numerators that computes BOTH the z-sample and
+// the z_next-sample accumulators in a single pass, reading each M31 column
+// value ONCE instead of twice. The two accumulations share ~90% of their
+// columns (trace + interaction cols) at different (b, c) coefficients, so
+// fusing them cuts device-memory traffic almost in half.
+//
+// Layout:
+//   cols indexed by col_indices_z[0..n_cols_z] and col_indices_zn[0..n_cols_zn]
+//   For every col appearing in BOTH lists (which is any trace/interaction
+//   col — EVERY column of the z_next list), we have a (b, c) pair in the z
+//   coefficients and a corresponding (b', c') pair in the z_next coefficients.
+//   Columns in z but not z_next are the 4 AIR quotient cols (indices
+//   N_COLS..N_COLS+4).
+//
+// Since the two lists share a prefix structure on the caller side
+// (col_idx_z = 0..N_COLS+4+12, col_idx_zn = trace + interaction skipping
+// quotient), we instead take a SIMPLE approach: iterate over the union by
+// iterating col_indices_z; for each col, also check if it's in z_next's set
+// and add its term. To avoid a second lookup, the caller pre-computes a
+// zn_coeff_idx array of length n_cols_z where zn_coeff_idx[i] = the index
+// of col_indices_z[i] within col_indices_zn, or UINT32_MAX if it's not
+// present (only the quotient cols will have UINT32_MAX).
+
+__global__ void accumulate_numerators_dual_kernel(
+    const uint32_t* const* __restrict__ col_ptrs,
+    const uint32_t* __restrict__ col_indices_z,
+    const uint32_t* __restrict__ zn_coeff_idx,   // [n_cols_z] index in zn or UINT32_MAX
+    const uint32_t* __restrict__ b_coeffs_z,
+    const uint32_t* __restrict__ c_coeffs_z,
+    const uint32_t* __restrict__ b_coeffs_zn,
+    const uint32_t* __restrict__ c_coeffs_zn,
+    uint32_t n_cols_z,
+    uint32_t n_rows,
+    uint32_t* __restrict__ out_z0, uint32_t* __restrict__ out_z1,
+    uint32_t* __restrict__ out_z2, uint32_t* __restrict__ out_z3,
+    uint32_t* __restrict__ out_zn0, uint32_t* __restrict__ out_zn1,
+    uint32_t* __restrict__ out_zn2, uint32_t* __restrict__ out_zn3
+) {
+    uint32_t row = blockIdx.x * blockDim.x + threadIdx.x;
+    if (row >= n_rows) return;
+
+    QM31 acc_z  = qm31_zero();
+    QM31 acc_zn = qm31_zero();
+
+    for (uint32_t i = 0; i < n_cols_z; i++) {
+        uint32_t col_idx = col_indices_z[i];
+        uint32_t f_val = col_ptrs[col_idx][row];  // ONE read shared between z and zn
+
+        // z sample contribution
+        QM31 c_z, b_z;
+        c_z.v[0] = c_coeffs_z[i * 4 + 0];
+        c_z.v[1] = c_coeffs_z[i * 4 + 1];
+        c_z.v[2] = c_coeffs_z[i * 4 + 2];
+        c_z.v[3] = c_coeffs_z[i * 4 + 3];
+        b_z.v[0] = b_coeffs_z[i * 4 + 0];
+        b_z.v[1] = b_coeffs_z[i * 4 + 1];
+        b_z.v[2] = b_coeffs_z[i * 4 + 2];
+        b_z.v[3] = b_coeffs_z[i * 4 + 3];
+        acc_z = qm31_add(acc_z, qm31_sub(qm31_mul_m31(c_z, f_val), b_z));
+
+        // z_next sample contribution — only if this col is in zn's list
+        uint32_t zn_i = zn_coeff_idx[i];
+        if (zn_i != 0xFFFFFFFFu) {
+            QM31 c_zn, b_zn;
+            c_zn.v[0] = c_coeffs_zn[zn_i * 4 + 0];
+            c_zn.v[1] = c_coeffs_zn[zn_i * 4 + 1];
+            c_zn.v[2] = c_coeffs_zn[zn_i * 4 + 2];
+            c_zn.v[3] = c_coeffs_zn[zn_i * 4 + 3];
+            b_zn.v[0] = b_coeffs_zn[zn_i * 4 + 0];
+            b_zn.v[1] = b_coeffs_zn[zn_i * 4 + 1];
+            b_zn.v[2] = b_coeffs_zn[zn_i * 4 + 2];
+            b_zn.v[3] = b_coeffs_zn[zn_i * 4 + 3];
+            acc_zn = qm31_add(acc_zn, qm31_sub(qm31_mul_m31(c_zn, f_val), b_zn));
+        }
+    }
+
+    out_z0[row]  = acc_z.v[0];
+    out_z1[row]  = acc_z.v[1];
+    out_z2[row]  = acc_z.v[2];
+    out_z3[row]  = acc_z.v[3];
+    out_zn0[row] = acc_zn.v[0];
+    out_zn1[row] = acc_zn.v[1];
+    out_zn2[row] = acc_zn.v[2];
+    out_zn3[row] = acc_zn.v[3];
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
 //  compute_quotients_and_combine kernel
 // ═══════════════════════════════════════════════════════════════════════════
 //
@@ -216,6 +306,31 @@ void cuda_accumulate_numerators(
     accumulate_numerators_kernel<<<blocks, threads>>>(
         col_ptrs, col_indices, b_coeffs, c_coeffs,
         n_batch_cols, n_rows, out0, out1, out2, out3
+    );
+}
+
+void cuda_accumulate_numerators_dual(
+    const uint32_t* const* col_ptrs,
+    const uint32_t* col_indices_z,
+    const uint32_t* zn_coeff_idx,
+    const uint32_t* b_coeffs_z,
+    const uint32_t* c_coeffs_z,
+    const uint32_t* b_coeffs_zn,
+    const uint32_t* c_coeffs_zn,
+    uint32_t n_cols_z,
+    uint32_t n_rows,
+    uint32_t* out_z0, uint32_t* out_z1, uint32_t* out_z2, uint32_t* out_z3,
+    uint32_t* out_zn0, uint32_t* out_zn1, uint32_t* out_zn2, uint32_t* out_zn3
+) {
+    if (n_rows == 0) return;
+    uint32_t threads = 256;
+    uint32_t blocks = (n_rows + threads - 1) / threads;
+    accumulate_numerators_dual_kernel<<<blocks, threads>>>(
+        col_ptrs, col_indices_z, zn_coeff_idx,
+        b_coeffs_z, c_coeffs_z, b_coeffs_zn, c_coeffs_zn,
+        n_cols_z, n_rows,
+        out_z0, out_z1, out_z2, out_z3,
+        out_zn0, out_zn1, out_zn2, out_zn3
     );
 }
 

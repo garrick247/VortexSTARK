@@ -160,6 +160,30 @@ pub fn eval_at_oods_from_coeffs(coeffs: &[u32], z: OodsPoint) -> QM31 {
     fold_m31(coeffs, &mappings_raw)
 }
 
+/// Sequential variant of [`eval_at_oods_from_coeffs`] — uses no internal
+/// rayon parallelism. Call this when the outer caller is ALREADY inside a
+/// `par_iter` over multiple polynomials; nested rayon work-stealing adds
+/// overhead and loses cache locality (measured at log_n=25 Phase 1.5:
+/// the nested version spent 750 ms per interaction poly vs ~60 ms for
+/// trace polys that run under a single outer `par_iter`).
+pub fn eval_at_oods_from_coeffs_seq(coeffs: &[u32], z: OodsPoint) -> QM31 {
+    let n = coeffs.len();
+    assert!(n.is_power_of_two() && n >= 1, "coeffs must have power-of-two length");
+    let log_n = n.trailing_zeros() as usize;
+    if log_n == 0 {
+        return qm31_from_m31(M31(coeffs[0]));
+    }
+    let mut mappings_raw = Vec::with_capacity(log_n);
+    mappings_raw.push(z.y);
+    let mut x = z.x;
+    for _ in 1..log_n {
+        mappings_raw.push(x);
+        x = double_x_qm31(x);
+    }
+    mappings_raw.reverse();
+    fold_m31_seq(coeffs, &mappings_raw)
+}
+
 /// Evaluate a QM31 polynomial (4 interleaved M31 limbs per row, SoA layout:
 /// [limb0[0..n], limb1[0..n], limb2[0..n], limb3[0..n]]) at OODS point z.
 ///
@@ -186,23 +210,131 @@ pub fn eval_qm31_col_at_oods(coeffs_soa: &[[u32; 4]], z: OodsPoint) -> QM31 {
     fold_qm31(coeffs_soa, &mappings_raw)
 }
 
-/// Recursive fold on M31 coefficients with QM31 folding factors.
+/// Iterative parallel fold on M31 coefficients with QM31 folding factors.
 ///
 /// Matches stwo's `fold<M31, SecureField>(values, folding_factors)`:
 ///   fold([c0..c_{n-1}], [f_{k-1}, ..., f_0]):
 ///     left  = fold(c0..c_{n/2-1},  [f_{k-2},..,f_0])
 ///     right = fold(c_{n/2}..c_{n-1}, [f_{k-2},..,f_0])
 ///     return left + f_{k-1} * right
+///
+/// The previous implementation was recursive with 2·T(N/2) + O(1), creating
+/// 2^k call frames and cache-hostile access patterns. At log_n=25 (N=128M,
+/// 50 fold calls per prove) the recursion alone dominated OODS. This
+/// version lifts the first pass (M31 → QM31 at leaves) into a parallel
+/// reduction on pairs, then collapses the remaining levels iteratively,
+/// keeping the working buffer in cache.
+/// Sequential fold of a (small) M31 slice with QM31 factors. Used as the
+/// per-segment kernel of `fold_m31`.
+fn fold_m31_seq(values: &[u32], factors: &[QM31]) -> QM31 {
+    if values.len() == 1 {
+        return qm31_from_m31(M31(values[0]));
+    }
+    let k = factors.len();
+    let mut buf: Vec<QM31> = values.chunks_exact(2).map(|p| {
+        qm31_from_m31(M31(p[0])) + factors[k - 1] * qm31_from_m31(M31(p[1]))
+    }).collect();
+    for lvl in (0..k - 1).rev() {
+        let f = factors[lvl];
+        buf = buf.chunks_exact(2).map(|p| p[0] + f * p[1]).collect();
+    }
+    buf[0]
+}
+
+/// Sequential fold of a QM31 slice.
+fn fold_qm31_seq(values: &[QM31], factors: &[QM31]) -> QM31 {
+    if values.len() == 1 {
+        return values[0];
+    }
+    let k = factors.len();
+    let mut buf: Vec<QM31> = values.chunks_exact(2).map(|p| p[0] + factors[k - 1] * p[1]).collect();
+    for lvl in (0..k - 1).rev() {
+        let f = factors[lvl];
+        buf = buf.chunks_exact(2).map(|p| p[0] + f * p[1]).collect();
+    }
+    buf[0]
+}
+
 fn fold_m31(values: &[u32], factors: &[QM31]) -> QM31 {
     if values.len() == 1 {
         return qm31_from_m31(M31(values[0]));
     }
     debug_assert_eq!(values.len(), 1 << factors.len(), "fold: length/factor mismatch");
-    let half = values.len() / 2;
-    let (first, rest) = factors.split_first().unwrap();
-    let left  = fold_m31(&values[..half], rest);
-    let right = fold_m31(&values[half..], rest);
-    left + *first * right
+    let k = factors.len();
+
+    // Segmented fold: each rayon thread folds a cache-resident segment of
+    // size S = 2^m sequentially (producing one QM31), then a sequential
+    // outer fold combines the partial results. Avoids the 1–2 GB Vec<QM31>
+    // allocations that dominated memory bandwidth in the flat iterative
+    // version at log_n >= 25.
+    //
+    // S is chosen so the segment buffer fits in L2 (~2 MB per core on 285K):
+    //   QM31 = 16 B. Vec<QM31> of size S = 16·S bytes.
+    //   At m=16, S=64K, buffer = 1 MB — fits comfortably in L2.
+    // For small k (< segment threshold), fall through to sequential.
+    const SEGMENT_LOG: usize = 16;
+    if k <= SEGMENT_LOG {
+        return fold_m31_seq(values, factors);
+    }
+    let m = SEGMENT_LOG;
+    let s = 1usize << m;
+    let inner_factors: &[QM31] = &factors[k - m..];
+    let outer_factors: &[QM31] = &factors[..k - m];
+
+    use rayon::prelude::*;
+    let partial: Vec<QM31> = values.par_chunks_exact(s).map(|seg| {
+        fold_m31_seq(seg, inner_factors)
+    }).collect();
+    fold_qm31_seq(&partial, outer_factors)
+}
+
+#[allow(dead_code)]
+fn fold_m31_unused(values: &[u32], factors: &[QM31]) -> QM31 {
+    if values.len() == 1 {
+        return qm31_from_m31(M31(values[0]));
+    }
+    debug_assert_eq!(values.len(), 1 << factors.len(), "fold: length/factor mismatch");
+    let k = factors.len();
+    // Recursive version:
+    //   fold(v, [f_0, f_1, ..., f_{k-1}]) = fold(v[..N/2], rest) + f_0 * fold(v[N/2..], rest)
+    // So f_0 multiplies the RIGHT HALF at the top level. Equivalently, the
+    // OUTERMOST split uses f_0 and pairs the two N/2-sized halves.
+    //
+    // Iterative equivalent: first pass pairs (v[i], v[i + N/2]) using f_0,
+    // second pass pairs (v[i], v[i + N/4]) using f_1, ... last pass uses f_{k-1}
+    // and pairs adjacent elements. That's NOT leaf-up — it's actually root-down.
+    //
+    // Let's trace with N=4, factors=[f_0, f_1]:
+    //   Recursive decomposition:
+    //     L = fold([c_0, c_1], [f_1]) = qm(c_0) + f_1 * qm(c_1)
+    //     R = fold([c_2, c_3], [f_1]) = qm(c_2) + f_1 * qm(c_3)
+    //     result = L + f_0 * R = qm(c_0) + f_1*qm(c_1) + f_0*qm(c_2) + f_0*f_1*qm(c_3)
+    //   Coefficient of c_i in final: prod over bits of i of (f_{k-1-bit}).
+    //   For i=0 (00): 1; i=1 (01): f_{k-1}; i=2 (10): f_{k-2}; i=3 (11): f_{k-2}*f_{k-1}.
+    //   So c_i's coefficient = prod_{b=0..k-1 where bit b of i set} f_{k-1-b}.
+    //   Rearranging: for i with binary rep i_{k-1} i_{k-2} ... i_0,
+    //     coeff(c_i) = prod_{b: i_b = 1} f_{k-1-b}
+    //
+    // The simplest iterative formulation: at each step, pair (v[2i], v[2i+1])
+    // using f_{k-1}, which turns c_{2i} + f_{k-1}*c_{2i+1} = coeff for bit 0.
+    // Next pass pairs using f_{k-2} — handles bit 1. Final pass handles bit k-1 using f_0.
+    use rayon::prelude::*;
+    // First pass: pair (v[2i], v[2i+1]) with factors[k-1]. Parallel over pairs.
+    // Also lifts u32 → QM31 so we avoid a second pass through the input.
+    let innermost = factors[k - 1];
+    let mut buf: Vec<QM31> = values.par_chunks_exact(2).map(|pair| {
+        let l = qm31_from_m31(M31(pair[0]));
+        let r = qm31_from_m31(M31(pair[1]));
+        l + innermost * r
+    }).collect();
+    // Iteratively halve, consuming factors from k-2 down to 0.
+    // Parallelize each level — at early levels buf.len() is still in the
+    // millions, enough to keep 24 cores busy.
+    for lvl in (0..k - 1).rev() {
+        let factor = factors[lvl];
+        buf = buf.par_chunks_exact(2).map(|pair| pair[0] + factor * pair[1]).collect();
+    }
+    buf[0]
 }
 
 /// Recursive fold on QM31 coefficients (AoS layout: [u32;4] per coeff).
