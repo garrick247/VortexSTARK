@@ -3175,6 +3175,13 @@ pub fn cairo_verify(proof: &CairoProof) -> Result<(), String> {
     // Verify that the claimed S_dict_final matches exec_key_new_sum computed
     // from the authenticated dict exec trace data.
     if !proof.dict_exec_data.is_empty() {
+        // Without a dict_exec_commitment, dict_exec_data is unauthenticated —
+        // a prover could stuff arbitrary rows in. Require the commitment
+        // so the downstream Merkle-auth check binds the rows to the proof.
+        if proof.dict_exec_commitment.is_none() {
+            return Err("dict_exec_data non-empty but dict_exec_commitment is None \
+                        — dict rows would be unauthenticated".into());
+        }
         use super::logup::qm31_from_m31;
         let n_acc = proof.dict_n_accesses;
         // Prevent panic on malformed dict_n_accesses > dict_exec_data.len().
