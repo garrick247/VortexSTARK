@@ -81,11 +81,21 @@
 //!
 //! ## Current encoding status
 //!
-//! `proof_to_snip36_bytes` currently emits `serde_json::to_vec` of
-//! our stwo proof — a structurally similar but incompatible
-//! placeholder. The CLI warning makes this clear. Matching the real
-//! format requires either vendoring `circuit_serialize` or
-//! implementing a write-side equivalent.
+//! `proof_to_snip36_bytes` still emits a structural placeholder —
+//! `serde_json::to_vec` of the stwo-shaped proof export — because the
+//! top-level on-the-wire `Proof<QM31>` type has a different *shape*
+//! than our `CairoProof` (different commitment trees, OODS layout,
+//! FRI config constants). See `SHINOBI_COMPAT_PLAN` note in
+//! `src/circuit_serialize.rs` for the full AIR-alignment caveat.
+//!
+//! The primitive encoders the wire format actually uses (M31, QM31,
+//! HashValue, slice/Vec) are now implemented faithfully in
+//! `crate::circuit_serialize` and exercised by unit tests — those
+//! match the upstream crate
+//! (`starkware-libs/stwo-circuits/crates/circuit_serialize`)
+//! byte-for-byte. Once the AIR is aligned, replacing
+//! `proof_to_snip36_bytes` with a struct-for-struct encode built out
+//! of those primitives is mechanical.
 
 use crate::cairo_air::prover::CairoProof;
 use crate::felt252::Felt252;

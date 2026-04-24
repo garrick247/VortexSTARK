@@ -23,7 +23,8 @@ default = []
 bench-max-size = []
 # Match Starknet Shinobi (v0.14.2) hardcoded Cairo verifier parameters:
 # BLOWUP_BITS=3, POW_BITS=27, N_QUERIES=23. Source pinned at
-# proving-utils@0305dbe.
+# proving-utils@0305dbe. zstd-level-3 framing is a separate step
+# (vendoring required); see `circuit_serialize::frame_with_zstd`.
 shinobi-compat = []
 
 [[bin]]
