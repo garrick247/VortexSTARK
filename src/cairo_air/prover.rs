@@ -2997,6 +2997,28 @@ pub fn cairo_verify(proof: &CairoProof) -> Result<(), String> {
         return Err(format!("fri_last_layer length {} exceeds eval size",
             proof.fri_last_layer.len()));
     }
+    // Exact shape checks on fields whose length must equal a specific
+    // structural constant. Prevents panics from downstream indexing
+    // when a malicious proof ships the wrong shape.
+    if proof.oods_trace_at_z.len() != N_COLS {
+        return Err(format!("oods_trace_at_z length {} != N_COLS ({})",
+            proof.oods_trace_at_z.len(), N_COLS));
+    }
+    if proof.oods_trace_at_z_next.len() != N_COLS {
+        return Err(format!("oods_trace_at_z_next length {} != N_COLS ({})",
+            proof.oods_trace_at_z_next.len(), N_COLS));
+    }
+    if proof.oods_quotient_at_z.len() != 4 {
+        return Err(format!("oods_quotient_at_z length {} != 4",
+            proof.oods_quotient_at_z.len()));
+    }
+    if proof.fri_decommitments.is_empty() {
+        return Err("fri_decommitments is empty — no FRI layers to verify".into());
+    }
+    if proof.fri_decommitments.len() != proof.fri_commitments.len() {
+        return Err(format!("fri_decommitments length {} != fri_commitments length {}",
+            proof.fri_decommitments.len(), proof.fri_commitments.len()));
+    }
 
     // ---- Cheap non-trivial-commitment gates ----
     // A zero commitment is a trivial/invalid Merkle root. Rejecting one
@@ -4794,6 +4816,29 @@ mod tests {
         proof.public_inputs.program = vec![0; 1024];
         let err = cairo_verify(&proof).expect_err("oversized program must be rejected");
         assert!(err.contains("program length"), "error: {err}");
+    }
+
+    #[test]
+    fn test_verifier_rejects_empty_fri_decommitments() {
+        // A malicious proof with fri_decommitments.len() == 0 would
+        // previously panic at `fri_decommitments[n_fri_layers - 1]`
+        // (usize underflow). Explicit shape check rejects cleanly.
+        ffi::init_memory_pool();
+        let program = build_fib_program(64);
+        let mut proof = cairo_prove(&program, 64, 6);
+        proof.fri_decommitments.clear();
+        let err = cairo_verify(&proof).expect_err("empty fri_decommitments must be rejected");
+        assert!(err.contains("fri_decommitments"), "error: {err}");
+    }
+
+    #[test]
+    fn test_verifier_rejects_wrong_oods_trace_at_z_length() {
+        ffi::init_memory_pool();
+        let program = build_fib_program(64);
+        let mut proof = cairo_prove(&program, 64, 6);
+        proof.oods_trace_at_z.truncate(proof.oods_trace_at_z.len() - 1);
+        let err = cairo_verify(&proof).expect_err("wrong oods length must be rejected");
+        assert!(err.contains("oods_trace_at_z length"), "error: {err}");
     }
 
     #[test]
