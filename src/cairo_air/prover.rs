@@ -3610,7 +3610,15 @@ pub fn cairo_verify(proof: &CairoProof) -> Result<(), String> {
             combined.push(crate::field::QM31::from_u32_array(proof.oods_quotient_at_z[k]));
         }
         channel.mix_felts(&combined);
-        let _oods_alpha = channel.draw_felt();
+        // Bind proof.oods_alpha to the Fiat-Shamir channel. Without this,
+        // a malicious prover could pick any alpha for the OODS line-coef
+        // accumulation — same class of bug as oods_z and logup_challenges.
+        let oods_alpha_chan = channel.draw_felt();
+        if oods_alpha_chan.to_u32_array() != proof.oods_alpha {
+            return Err(format!(
+                "oods_alpha mismatch: proof claims {:?}, channel derives {:?}",
+                proof.oods_alpha, oods_alpha_chan.to_u32_array()));
+        }
     }
 
     // Mix the OODS quotient Merkle commitment (prover commits this before fri_alpha).
@@ -4887,6 +4895,19 @@ mod tests {
         proof.public_inputs.program = vec![0; 1024];
         let err = cairo_verify(&proof).expect_err("oversized program must be rejected");
         assert!(err.contains("program length"), "error: {err}");
+    }
+
+    #[test]
+    fn test_verifier_rejects_forged_oods_alpha() {
+        // Third instance of the same class: oods_alpha must match the FS
+        // channel. Flipping one u32 of proof.oods_alpha must be rejected.
+        ffi::init_memory_pool();
+        let program = build_fib_program(64);
+        let mut proof = cairo_prove(&program, 64, 6);
+        cairo_verify(&proof).expect("unmodified proof must verify");
+        proof.oods_alpha[0] ^= 1;
+        let err = cairo_verify(&proof).expect_err("forged oods_alpha must be rejected");
+        assert!(err.contains("oods_alpha"), "error: {err}");
     }
 
     #[test]
