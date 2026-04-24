@@ -94,10 +94,15 @@ __global__ void accumulate_numerators_kernel(
 // of col_indices_z[i] within col_indices_zn, or UINT32_MAX if it's not
 // present (only the quotient cols will have UINT32_MAX).
 
+// Upper bound on columns per batch. The VortexSTARK main prove runs
+// with n_cols_z = N_COLS + 4 + 12 = 50 at most. 128 gives headroom
+// for future additions without changing the shmem layout.
+#define ACC_MAX_COLS 128
+
 __global__ void accumulate_numerators_dual_kernel(
     const uint32_t* const* __restrict__ col_ptrs,
     const uint32_t* __restrict__ col_indices_z,
-    const uint32_t* __restrict__ zn_coeff_idx,   // [n_cols_z] index in zn or UINT32_MAX
+    const uint32_t* __restrict__ zn_coeff_idx,
     const uint32_t* __restrict__ b_coeffs_z,
     const uint32_t* __restrict__ c_coeffs_z,
     const uint32_t* __restrict__ b_coeffs_zn,
@@ -109,6 +114,40 @@ __global__ void accumulate_numerators_dual_kernel(
     uint32_t* __restrict__ out_zn0, uint32_t* __restrict__ out_zn1,
     uint32_t* __restrict__ out_zn2, uint32_t* __restrict__ out_zn3
 ) {
+    // Stage per-iteration metadata in shared memory. Every thread in
+    // the block uses the SAME col_indices / zn_coeff_idx / (b, c)
+    // values for iteration i; loading them once from global memory
+    // and reading from shared on the hot path saves ~96 cached loads
+    // per thread per row. At 128M rows that's a 12B-load reduction.
+    __shared__ const uint32_t* s_col_ptrs[ACC_MAX_COLS];
+    __shared__ uint32_t s_col_indices[ACC_MAX_COLS];
+    __shared__ uint32_t s_zn_coeff_idx[ACC_MAX_COLS];
+    __shared__ uint32_t s_bc_z[ACC_MAX_COLS * 8];   // interleaved (b0,b1,b2,b3,c0,c1,c2,c3)
+    __shared__ uint32_t s_bc_zn[ACC_MAX_COLS * 8];
+
+    // Cooperative load: threads in the block split the work.
+    uint32_t tid = threadIdx.x;
+    if (tid < n_cols_z) {
+        uint32_t ci = col_indices_z[tid];
+        s_col_indices[tid] = ci;
+        s_col_ptrs[tid] = col_ptrs[ci];
+        s_zn_coeff_idx[tid] = zn_coeff_idx[tid];
+        #pragma unroll
+        for (int k = 0; k < 4; k++) {
+            s_bc_z[tid * 8 + k]     = b_coeffs_z[tid * 4 + k];
+            s_bc_z[tid * 8 + 4 + k] = c_coeffs_z[tid * 4 + k];
+        }
+        uint32_t zi = s_zn_coeff_idx[tid];
+        if (zi != 0xFFFFFFFFu) {
+            #pragma unroll
+            for (int k = 0; k < 4; k++) {
+                s_bc_zn[tid * 8 + k]     = b_coeffs_zn[zi * 4 + k];
+                s_bc_zn[tid * 8 + 4 + k] = c_coeffs_zn[zi * 4 + k];
+            }
+        }
+    }
+    __syncthreads();
+
     uint32_t row = blockIdx.x * blockDim.x + threadIdx.x;
     if (row >= n_rows) return;
 
@@ -116,33 +155,18 @@ __global__ void accumulate_numerators_dual_kernel(
     QM31 acc_zn = qm31_zero();
 
     for (uint32_t i = 0; i < n_cols_z; i++) {
-        uint32_t col_idx = col_indices_z[i];
-        uint32_t f_val = col_ptrs[col_idx][row];  // ONE read shared between z and zn
+        uint32_t f_val = s_col_ptrs[i][row];
 
-        // z sample contribution
-        QM31 c_z, b_z;
-        c_z.v[0] = c_coeffs_z[i * 4 + 0];
-        c_z.v[1] = c_coeffs_z[i * 4 + 1];
-        c_z.v[2] = c_coeffs_z[i * 4 + 2];
-        c_z.v[3] = c_coeffs_z[i * 4 + 3];
-        b_z.v[0] = b_coeffs_z[i * 4 + 0];
-        b_z.v[1] = b_coeffs_z[i * 4 + 1];
-        b_z.v[2] = b_coeffs_z[i * 4 + 2];
-        b_z.v[3] = b_coeffs_z[i * 4 + 3];
+        // z contribution
+        QM31 b_z = {{s_bc_z[i*8+0], s_bc_z[i*8+1], s_bc_z[i*8+2], s_bc_z[i*8+3]}};
+        QM31 c_z = {{s_bc_z[i*8+4], s_bc_z[i*8+5], s_bc_z[i*8+6], s_bc_z[i*8+7]}};
         acc_z = qm31_add(acc_z, qm31_sub(qm31_mul_m31(c_z, f_val), b_z));
 
-        // z_next sample contribution — only if this col is in zn's list
-        uint32_t zn_i = zn_coeff_idx[i];
+        // z_next contribution — branch predictable (same for all threads)
+        uint32_t zn_i = s_zn_coeff_idx[i];
         if (zn_i != 0xFFFFFFFFu) {
-            QM31 c_zn, b_zn;
-            c_zn.v[0] = c_coeffs_zn[zn_i * 4 + 0];
-            c_zn.v[1] = c_coeffs_zn[zn_i * 4 + 1];
-            c_zn.v[2] = c_coeffs_zn[zn_i * 4 + 2];
-            c_zn.v[3] = c_coeffs_zn[zn_i * 4 + 3];
-            b_zn.v[0] = b_coeffs_zn[zn_i * 4 + 0];
-            b_zn.v[1] = b_coeffs_zn[zn_i * 4 + 1];
-            b_zn.v[2] = b_coeffs_zn[zn_i * 4 + 2];
-            b_zn.v[3] = b_coeffs_zn[zn_i * 4 + 3];
+            QM31 b_zn = {{s_bc_zn[i*8+0], s_bc_zn[i*8+1], s_bc_zn[i*8+2], s_bc_zn[i*8+3]}};
+            QM31 c_zn = {{s_bc_zn[i*8+4], s_bc_zn[i*8+5], s_bc_zn[i*8+6], s_bc_zn[i*8+7]}};
             acc_zn = qm31_add(acc_zn, qm31_sub(qm31_mul_m31(c_zn, f_val), b_zn));
         }
     }
