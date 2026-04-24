@@ -983,7 +983,8 @@ fn cairo_prove_cached_with_columns(
             let pt = if brt_i < half_eval { ho.at(brt_i) } else { ho.at(brt_i - half_eval).conjugate() };
             Coset::coset_vanishing_at(&trace_coset, pt).0
         }).collect();
-        DeviceBuffer::from_host(&zh)
+        // Pinned staging — eval_size u32 at log_n=25 is 512 MB.
+        DeviceBuffer::from_host_chunked(&zh)
     };
 
     // Pre-generate one random blinding scalar per ZK-blinded column.
@@ -1008,7 +1009,8 @@ fn cairo_prove_cached_with_columns(
     // Stwo NTT LDE: trace column → stwo-basis coefficients → eval-domain BRT-canonic evaluations.
     // Permute hc→canonic on GPU (cuda_permute_hc_to_canonic_brt) to avoid a CPU-side gather.
     let ntt_col_save = |src: &Vec<u32>| -> (DeviceBuffer<u32>, Vec<u32>) {
-        let d_src = DeviceBuffer::from_host(src);
+        // Pinned-staging upload — 34 trace cols × 128 MB at log_n=25 is 4.3 GB.
+        let d_src = DeviceBuffer::from_host_chunked(src);
         let mut d_col = DeviceBuffer::<u32>::alloc(n);
         unsafe { ffi::cuda_permute_hc_to_canonic_brt(d_src.as_ptr(), d_col.as_mut_ptr(), n as u32, log_n); }
         drop(d_src);
@@ -1236,10 +1238,10 @@ fn cairo_prove_cached_with_columns(
     };
     let dict_link_final_arr = s_dict_final.to_u32_array();
 
-    // NTT S_dict trace using stwo NTT LDE.
+    // NTT S_dict trace using stwo NTT LDE. Pinned-staging upload for DMA.
     let mut d_sdict_gpu: [DeviceBuffer<u32>; 4] = std::array::from_fn(|_| DeviceBuffer::<u32>::alloc(0));
     for c in 0..4 {
-        d_sdict_gpu[c] = stwo_ntt_lde(DeviceBuffer::from_host(&dict_main_interaction_trace[c]));
+        d_sdict_gpu[c] = stwo_ntt_lde(DeviceBuffer::from_host_chunked(&dict_main_interaction_trace[c]));
     }
     let [d_sdict0, d_sdict1, d_sdict2, d_sdict3] = d_sdict_gpu;
 
@@ -1741,8 +1743,11 @@ fn cairo_prove_cached_with_columns(
     channel.mix_digest(&rc_interaction_commitment);
 
     // NTT + commit T/U intermediate columns.
+    // Use pinned-staging upload — 4 × eval_size per call × 5 calls = 10 GB
+    // H2D at log_n=25. Non-pinned `from_host` measured ~0.8 GB/s in the
+    // driver staging path; our shared-pinned pool gets 37 GB/s.
     let ntt_qm31 = |data: &[Vec<u32>; 4]| -> [DeviceBuffer<u32>; 4] {
-        std::array::from_fn(|c| stwo_ntt_lde(DeviceBuffer::from_host(&data[c])))
+        std::array::from_fn(|c| stwo_ntt_lde(DeviceBuffer::from_host_chunked(&data[c])))
     };
     // Keep the hc-natural GPU buffers alive after commit — the quotient
     // phase consumes them, and re-uploading via host Vec was a 5×4×eval_size
@@ -1870,7 +1875,8 @@ fn cairo_prove_cached_with_columns(
             let vh = crate::circle::Coset::coset_vanishing_at(&trace_domain_for_vh, pt);
             vh.inverse().0
         }).collect();
-        DeviceBuffer::from_host(&vh_inv_vals)
+        // Pinned staging — eval_size u32 at log_n=25 is 512 MB.
+        DeviceBuffer::from_host_chunked(&vh_inv_vals)
     };
     q3_tag("vh_inv_compute");
 
@@ -1900,7 +1906,8 @@ fn cairo_prove_cached_with_columns(
             let pt = eval_domain.at(i);
             (pt.y - y_trace_last).0
         }).collect();
-        DeviceBuffer::from_host(&tf)
+        // Pinned staging — eval_size u32 at log_n=25 is 512 MB.
+        DeviceBuffer::from_host_chunked(&tf)
     };
     q3_tag("trans_factor_compute");
 
@@ -2259,8 +2266,11 @@ fn cairo_prove_cached_with_columns(
         // Also keep half_coset-ordered versions for INTT → OODS point evaluation.
         let srcs_cn: [&[Vec<u32>]; 3] = [&host_logup, &host_rc_logup, &host_sdict];
         // d_interaction_eval[pi][k] = canonic-order GPU buffer (for numerator accumulation)
+        // Uses the pinned-staging upload path for full PCIe DMA throughput
+        // (3 × 4 × eval_size = 6 GB at log_n=25; non-pinned measured 0.8 GB/s,
+        // staged 37 GB/s).
         let d_interaction_eval: Vec<Vec<DeviceBuffer<u32>>> = srcs_cn.iter()
-            .map(|src| (0..4).map(|k| DeviceBuffer::from_host(&src[k])).collect())
+            .map(|src| (0..4).map(|k| DeviceBuffer::from_host_chunked(&src[k])).collect())
             .collect();
         let (interaction_evals_raw, interaction_evals_next_raw): ([[[u32; 4]; 4]; 3], [[[u32; 4]; 4]; 3]) = {
             // Stage 1: run all 12 GPU INTTs serially (they share the default stream),
@@ -2413,12 +2423,16 @@ fn cairo_prove_cached_with_columns(
         //             point directly at the live d_interaction_eval buffers).
         // cols 0..N_COLS = trace, cols N_COLS..N_COLS+4 = quotient q0..q3,
         // cols N_COLS+4..N_COLS+16 = 12 interaction cols (3 interactions × 4).
+        // Stage trace + quotient H2D through the shared 256 MB pinned pool.
+        // `from_host` on a plain Vec<u32> hits the CUDA driver's own staging
+        // path (measured ~0.8 GB/s at log_n=25 on this RTX 5090 / Win11 setup).
+        // Staging through our pool gets pipeline-parallel PCIe DMA.
         let d_eval_cols: Vec<DeviceBuffer<u32>> = host_eval_cols.iter()
-            .map(|c| DeviceBuffer::from_host(c)).collect();
-        let d_q0 = DeviceBuffer::from_host(&host_q0);
-        let d_q1 = DeviceBuffer::from_host(&host_q1);
-        let d_q2 = DeviceBuffer::from_host(&host_q2);
-        let d_q3 = DeviceBuffer::from_host(&host_q3);
+            .map(|c| DeviceBuffer::from_host_chunked(c)).collect();
+        let d_q0 = DeviceBuffer::from_host_chunked(&host_q0);
+        let d_q1 = DeviceBuffer::from_host_chunked(&host_q1);
+        let d_q2 = DeviceBuffer::from_host_chunked(&host_q2);
+        let d_q3 = DeviceBuffer::from_host_chunked(&host_q3);
 
         let mut all_col_ptrs: Vec<*const u32> = Vec::with_capacity(N_COLS + 4 + 12);
         all_col_ptrs.extend(d_eval_cols.iter().map(|b| b.as_ptr()));
