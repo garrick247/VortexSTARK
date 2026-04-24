@@ -3337,9 +3337,33 @@ pub fn cairo_verify(proof: &CairoProof) -> Result<(), String> {
         ]);
     }
 
-    let _z_mem = channel.draw_felt();
-    let _alpha_mem = channel.draw_felt();
-    let _z_rc = channel.draw_felt();
+    let z_mem_chan     = channel.draw_felt();
+    let alpha_mem_chan = channel.draw_felt();
+    let z_rc_chan      = channel.draw_felt();
+    // Verify proof.logup_challenges was derived from the same FS channel
+    // as the prover's. Without this check, a malicious prover could pick
+    // arbitrary logup/RC/dict challenges after seeing commitments and
+    // forge constraint evaluations that use proof.logup_challenges
+    // downstream. Same class of bug as the oods_z binding.
+    {
+        let alpha_mem_sq_chan = alpha_mem_chan * alpha_mem_chan;
+        let expected: [u32; 24] = {
+            let mut a = [0u32; 24];
+            a[ 0.. 4].copy_from_slice(&z_mem_chan.to_u32_array());
+            a[ 4.. 8].copy_from_slice(&alpha_mem_chan.to_u32_array());
+            a[ 8..12].copy_from_slice(&alpha_mem_sq_chan.to_u32_array());
+            a[12..16].copy_from_slice(&z_rc_chan.to_u32_array());
+            a[16..20].copy_from_slice(&z_dict_link_v.to_u32_array());
+            a[20..24].copy_from_slice(&alpha_dict_link_v.to_u32_array());
+            a
+        };
+        if expected != proof.logup_challenges {
+            return Err(format!(
+                "logup_challenges mismatch: proof claims {:?}, channel derives {:?} — \
+                 prover may have forged FS challenges outside Fiat-Shamir",
+                proof.logup_challenges, expected));
+        }
+    }
 
     // ---- LogUp + Range check verification ----
     // The LogUp final sum and RC final sum are bound into the Fiat-Shamir transcript.
@@ -3508,7 +3532,7 @@ pub fn cairo_verify(proof: &CairoProof) -> Result<(), String> {
             .map(|&[a, v, m]| (M31(a), M31(v), m)).collect();
         let instr_entries: Vec<(M31, M31, M31, u32)> = proof.memory_instr_data.iter()
             .map(|&[p, lo, hi, m]| (M31(p), M31(lo), M31(hi), m)).collect();
-        let table_sum = compute_memory_table_sum(&data_entries, &instr_entries, _z_mem, _alpha_mem);
+        let table_sum = compute_memory_table_sum(&data_entries, &instr_entries, z_mem_chan, alpha_mem_chan);
         let exec_sum = QM31::from_u32_array(proof.logup_final_sum);
         if exec_sum + table_sum != QM31::ZERO {
             return Err(format!(
@@ -3535,7 +3559,7 @@ pub fn cairo_verify(proof: &CairoProof) -> Result<(), String> {
         let rc_counts_arr: [u32; RC_TABLE_SIZE] = proof.rc_counts_data.as_slice()
             .try_into()
             .map_err(|_| "RC counts data wrong length".to_string())?;
-        let rc_table_sum = compute_rc_table_sum(&rc_counts_arr, _z_rc);
+        let rc_table_sum = compute_rc_table_sum(&rc_counts_arr, z_rc_chan);
         let rc_exec_sum = QM31::from_u32_array(proof.rc_final_sum);
         if rc_exec_sum + rc_table_sum != QM31::ZERO {
             return Err(format!(
@@ -4863,6 +4887,20 @@ mod tests {
         proof.public_inputs.program = vec![0; 1024];
         let err = cairo_verify(&proof).expect_err("oversized program must be rejected");
         assert!(err.contains("program length"), "error: {err}");
+    }
+
+    #[test]
+    fn test_verifier_rejects_forged_logup_challenges() {
+        // Same class of bug as oods_z: the logup/RC/dict-link challenges
+        // MUST be Fiat-Shamir-derived, not prover-chosen. A flipped bit
+        // in proof.logup_challenges must be rejected.
+        ffi::init_memory_pool();
+        let program = build_fib_program(64);
+        let mut proof = cairo_prove(&program, 64, 6);
+        cairo_verify(&proof).expect("unmodified proof must verify");
+        proof.logup_challenges[0] ^= 1;
+        let err = cairo_verify(&proof).expect_err("forged logup_challenges must be rejected");
+        assert!(err.contains("logup_challenges"), "error: {err}");
     }
 
     #[test]
