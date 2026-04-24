@@ -4735,13 +4735,15 @@ fn decommit_from_host_soa4(
     }
 
     // Use pre-computed tile roots to skip the O(n) tree rebuild.
-    let cols4: [Vec<u32>; 4] = [
-        host_cols[0].clone(), host_cols[1].clone(),
-        host_cols[2].clone(), host_cols[3].clone(),
-    ];
-    let hash_leaf = |i: usize| MerkleTree::hash_leaf(&[
-        cols4[0][i], cols4[1][i], cols4[2][i], cols4[3][i],
-    ]);
+    // Reference the input columns directly — cloning them would be a
+    // 4×eval_size u32 copy per call (2 GB at log_n=25, 26 GB across all
+    // ~13 decommit sites), which adds material wall-clock time to
+    // phase5_pow_decommit for no functional benefit.
+    let c0 = &host_cols[0];
+    let c1 = &host_cols[1];
+    let c2 = &host_cols[2];
+    let c3 = &host_cols[3];
+    let hash_leaf = |i: usize| MerkleTree::hash_leaf(&[c0[i], c1[i], c2[i], c3[i]]);
     let all_paths = MerkleTree::targeted_auth_paths_with_tile_roots(
         tile_roots, n, &all_indices, &hash_leaf,
     );
