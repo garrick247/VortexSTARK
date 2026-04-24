@@ -44,10 +44,48 @@
 //! for tooling/testing. The `[4..]` SNOS output must come from an
 //! actual SNOS run, not from VortexSTARK's single-program proof.
 //!
-//! ## Wire format for `proof` bytes
+//! ## Wire format for `proof` bytes (confirmed from source 2026-04)
 //!
-//! Still TBD against the actual `privacy_circuit_verify` deserializer.
-//! Current placeholder: serde_json bytes. Do NOT use for mainnet.
+//! Source: `starkware-libs/proving-utils/crates/privacy_circuit_verify/src/lib.rs`
+//! at rev `0305dbe` (the rev pinned by the sequencer's Cargo.toml).
+//!
+//! **The bytes are zstd-compressed.** After `zstd::bulk::decompress`:
+//!   - For `verify_cairo` (the non-recursive path): the uncompressed
+//!     stream starts with a `public_claim: Vec<u32>` of fixed length
+//!     `(PUBLIC_DATA_LEN + NUM_OUTPUTS + program_len) * 4` bytes,
+//!     then a custom-serialized `StarkProof` parsed by
+//!     `circuit_serialize::deserialize_proof_with_config`.
+//!   - For `verify_recursive_circuit` (the path Invoke V3 uses):
+//!     the uncompressed stream is just the serialized proof; the
+//!     public claim is derived from `proof_facts` instead.
+//!
+//! `circuit_serialize` is a custom binary format — NOT bincode, NOT
+//! serde_json. Matching it requires vendoring the crate (also in
+//! proving-utils) or re-implementing its write side.
+//!
+//! ## Shinobi's hardcoded verifier parameters (Phase 1)
+//!
+//! The privacy Cairo verifier pins these:
+//!   CAIRO_TRACE_LOG_SIZE      = 20    (1M rows, exact)
+//!   CAIRO_LOG_BLOWUP_FACTOR   = 3     (vs VortexSTARK's 2)
+//!   CAIRO_PCS_CONFIG.pow_bits = 27    (vs VortexSTARK's 26)
+//!   CAIRO_FRI_CONFIG.n_queries = 23   (vs VortexSTARK's 80)
+//!   CIRCUIT_TRACE_LOG_SIZE    = 21    (recursion circuit)
+//!   CIRCUIT_LOG_BLOWUP_FACTOR = 2
+//!
+//! VortexSTARK's default build uses different parameters. A
+//! Shinobi-compatible build would need a feature flag that swaps
+//! `BLOWUP_BITS = 3`, `POW_BITS = 27`, `N_QUERIES = 23`, and locks
+//! `log_n = 20` for the production Cairo path. See
+//! `SHINOBI_COMPAT_PLAN.md` (future doc) for the full checklist.
+//!
+//! ## Current encoding status
+//!
+//! `proof_to_snip36_bytes` currently emits `serde_json::to_vec` of
+//! our stwo proof — a structurally similar but incompatible
+//! placeholder. The CLI warning makes this clear. Matching the real
+//! format requires either vendoring `circuit_serialize` or
+//! implementing a write-side equivalent.
 
 use crate::cairo_air::prover::CairoProof;
 use crate::felt252::Felt252;
