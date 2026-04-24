@@ -23,9 +23,10 @@ Default build, `BLOWUP_BITS=2`, 160-bit security, N_QUERIES=80, PoW=26 bits:
 | Fibonacci log_n=24 | 16.8M elements | 214ms | 6.2ms |
 | Fibonacci log_n=28 | 268M elements | 1.55s | 8.2ms |
 | Fibonacci log_n=29 | 537M elements | 8.9s | 7.8ms |
-| Cairo VM log_n=20 | 1.0M steps | 994ms | 112ms |
-| Cairo VM log_n=24 | 16.8M steps | 16.8s | 1.66s |
-| Cairo VM log_n=26 | 67M steps | 169s | 7.9s |
+| Cairo VM log_n=22 | 4.2M steps | 11.4s | ~1s |
+| Cairo VM log_n=24 | 16.8M steps | 48.8s | ~3s |
+| Cairo VM log_n=25 | 33.5M steps | 198s | ~5s |
+| Cairo VM log_n=26 | 67M steps | OOM (needs >32 GB VRAM) | — |
 | Poseidon2 trace+NTT log_n=28 | 8.9M hashes | 1.92s | — |
 | RPO-M31 trace+NTT log_n=28 | 19.2M hashes | 5.51s | — |
 | Pedersen GPU batch | 1M hashes | 26.6ms | — |

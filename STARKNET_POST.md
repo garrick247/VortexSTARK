@@ -44,9 +44,10 @@ Cairo VM proving runs end-to-end through the GPU pipeline. The CLI emits `cairo-
 | Fibonacci log_n=24 | 16.8M elements | 214ms | 6.2ms |
 | Fibonacci log_n=28 | 268M elements | 1.55s | 8.2ms |
 | Fibonacci log_n=29 | 537M elements | 8.9s | 7.8ms |
-| Cairo VM log_n=20 | 1.0M steps | 994ms | 112ms |
-| Cairo VM log_n=24 | 16.8M steps | 16.8s | 1.66s |
-| Cairo VM log_n=26 | 67M steps | 169s | 7.9s |
+| Cairo VM log_n=22 | 4.2M steps | 11.4s | ~1s |
+| Cairo VM log_n=24 | 16.8M steps | 48.8s | ~3s |
+| Cairo VM log_n=25 | 33.5M steps | 198s | ~5s |
+| Cairo VM log_n=26 | 67M steps | OOM (needs >32 GB VRAM) | — |
 | Poseidon2 trace+NTT log_n=28 | 8.9M hashes | 1.92s | — |
 | Pedersen GPU batch | 1M hashes | 26.6ms | — |
 
@@ -102,7 +103,7 @@ Proofs are submittable directly to Starknet's on-chain verifier.
   store `felt252` — design plan is in `FELT252_DESIGN.md`, ~3–4 weeks + audit.
   Option B (side table + pointer columns) recommended — 5–8% perf hit, no
   pervasive trace changes, GAP-1 soundness argument extends cleanly.
-- **Cairo VM prove speed**: 169s at log_n=26 today. Profiler identifies top-3
+- **Cairo VM prove speed**: log_n=25 measures 198s (OODS is 40%, 80s). log_n=26 currently OOMs on 32 GB VRAM — the full 34-column eval-domain trace requires >32 GB. Super-linear scaling in OODS, phase3_quotient, and phase5_pow_decommit is the dominant issue. Profiler identifies top-3
   phases (`oods`, `ntt_blind_commit`, `phase2_logup_rc`) = 80% of prove time.
   Roadmap in `PERF_ROADMAP.md` projects 2–3× via kernel fusion, further 2–3×
   via algorithmic swaps (GrandProduct LogUp, barycentric OODS). Block cadence

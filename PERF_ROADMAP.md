@@ -108,11 +108,41 @@ remaining phase is now much flatter — no single phase owns >30% of the
 prove. Future optimization needs to attack several simultaneously, or
 move to the architectural items above.
 
-**log_n=24, 26 not re-measured this session.** WSL2 kernel 6.6 + Cairo
-prove at that size still crashes the VM (documented in `WSL_SETUP.md`).
-The perf wins should scale proportionally — most are eval_size-denominated
-parallelism — so log_n=26 should drop from ~169s to somewhere in the
-~50–60s range. Needs a clean-WSL measurement to confirm.
+**log_n=24, 25, 26 remeasured 2026-04-23 (Windows native, clean GPU):**
+
+| log_n | Data        | Prove  | vs log_n=22 |
+|-------|-------------|-------:|----:|
+| 22    |  4.2M rows  |  11.4s | 1× |
+| 24    | 16.8M rows  |  48.8s | 4.3× (expected 4×) |
+| 25    | 33.5M rows  |   198s | 17.4× (expected 8×) |
+| 26    | 67M rows    | **OOM** | — (needs >32 GB VRAM) |
+
+The 8× jump at log_n=25 reveals **super-linear scaling in three phases** that
+were under-optimized in the 2026-04-22 push:
+
+| Phase                 | log_n=22 | log_n=25 | Scaling factor |
+|-----------------------|---------:|---------:|---:|
+| oods                  |   2.9s   |   80.4s  | **27.8×** |
+| phase5_pow_decommit   |   0.8s   |   28.5s  | **35.5×** |
+| phase3_quotient       |   0.9s   |   22.2s  | **25.9×** |
+| phase2_logup_rc       |   3.4s   |   34.3s  | 10× |
+| ntt_blind_commit      |   3.8s   |   21.3s  | 5.6× |
+
+**log_n=26 OOM root cause:** the full 34-column eval-domain trace at
+log_n=26 needs `34 × 2^28 × 4B = 34 GB`, exceeding the 32 GB VRAM on an
+RTX 5090. Current pipeline loads it into pinned host memory as backup,
+which fails on Windows due to page-locked-memory limits.
+
+### Next perf targets
+
+1. **OODS** — hottest phase (40% at log_n=25). Investigate per-column
+   `eval_at_oods_from_coeffs` (currently `par_iter` on 34 cols, limited
+   parallelism) + 4 CPU `permute_half_coset_to_canonic` calls on
+   eval-domain-sized arrays for the AIR quotient columns at line 2231.
+2. **phase5_pow_decommit** — scales 35× for 8× data. Probable Merkle
+   auth path generation super-linearity or host-side Blake2s serialization.
+3. **Streaming eval columns at log_n ≥ 26** — one-column-at-a-time
+   processing to fit in <32 GB VRAM budget.
 
 ## How to reproduce
 
