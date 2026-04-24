@@ -1048,6 +1048,26 @@ fn cairo_prove_cached_with_columns(
         out
     };
 
+    // `host_eval_*_hc` is only consumed by a `#[cfg(test)]` diagnostic at
+    // line ~2120, but the CPU-side canonic→hc permute previously ran in
+    // release too. At log_n=25 that was 17 GB of pointless work on 34 cols.
+    // Compute the hc host copy only in test builds; production uses the
+    // GPU-resident `d_hc` directly.
+    let cpu_permute_to_hc = |cn: &[Vec<u32>]| -> Vec<Vec<u32>> {
+        #[cfg(test)]
+        {
+            use rayon::prelude::*;
+            return cn.par_iter()
+                .map(|c| Coset::permute_canonic_brt_to_hc_natural(c, log_eval_size))
+                .collect();
+        }
+        #[cfg(not(test))]
+        {
+            let _ = cn;
+            Vec::new()
+        }
+    };
+
     // ── Group A: cols 0..TRACE_LO ──────────────────────────────────────────
     let (trace_commitment, tile_roots_lo, host_eval_lo, host_eval_lo_hc, d_eval_lo_hc): ([u32; 8], Vec<[u32; 8]>, Vec<Vec<u32>>, Vec<Vec<u32>>, Vec<DeviceBuffer<u32>>) = {
         let mut group: Vec<DeviceBuffer<u32>> = Vec::with_capacity(TRACE_LO);
@@ -1063,10 +1083,7 @@ fn cairo_prove_cached_with_columns(
         }
         unsafe { ffi::cuda_device_sync(); }
         let cn: Vec<Vec<u32>> = group.iter().map(|c| c.to_host_fast()).collect();
-        let hc: Vec<Vec<u32>> = {
-            use rayon::prelude::*;
-            cn.par_iter().map(|c| Coset::permute_canonic_brt_to_hc_natural(c, log_eval_size)).collect()
-        };
+        let hc: Vec<Vec<u32>> = cpu_permute_to_hc(&cn);
         let d_hc = build_d_hc(&group);
         let (root, tile_roots) = MerkleTree::commit_root_only_with_subtrees(&group, log_eval_size);
         (root, tile_roots, cn, hc, d_hc)
@@ -1088,10 +1105,7 @@ fn cairo_prove_cached_with_columns(
         }
         unsafe { ffi::cuda_device_sync(); }
         let cn: Vec<Vec<u32>> = group.iter().map(|c| c.to_host_fast()).collect();
-        let hc: Vec<Vec<u32>> = {
-            use rayon::prelude::*;
-            cn.par_iter().map(|c| Coset::permute_canonic_brt_to_hc_natural(c, log_eval_size)).collect()
-        };
+        let hc: Vec<Vec<u32>> = cpu_permute_to_hc(&cn);
         let d_hc = build_d_hc(&group);
         let (root, tile_roots) = MerkleTree::commit_root_only_with_subtrees(&group, log_eval_size);
         (root, tile_roots, cn, hc, d_hc)
@@ -1113,10 +1127,7 @@ fn cairo_prove_cached_with_columns(
         }
         unsafe { ffi::cuda_device_sync(); }
         let cn: Vec<Vec<u32>> = group.iter().map(|c| c.to_host_fast()).collect();
-        let hc: Vec<Vec<u32>> = {
-            use rayon::prelude::*;
-            cn.par_iter().map(|c| Coset::permute_canonic_brt_to_hc_natural(c, log_eval_size)).collect()
-        };
+        let hc: Vec<Vec<u32>> = cpu_permute_to_hc(&cn);
         let d_hc = build_d_hc(&group);
         let (root, tile_roots) = MerkleTree::commit_root_only_with_subtrees(&group, log_eval_size);
         (root, tile_roots, cn, hc, d_hc)
