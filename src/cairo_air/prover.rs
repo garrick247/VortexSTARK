@@ -1679,35 +1679,46 @@ fn cairo_prove_cached_with_columns(
     let rc_d0 = stwo_ntt_lde(rc0); let rc_d1 = stwo_ntt_lde(rc1);
     let rc_d2 = stwo_ntt_lde(rc2); let rc_d3 = stwo_ntt_lde(rc3);
 
-    let (interaction_commitment, tile_roots_logup, host_logup, host_logup_hc) = {
-        // Copy to host for later decommit work, then commit directly from the
-        // GPU-resident buffers — saves a 4-col eval-domain H->D round-trip.
+    // Helper for logup/rc commits — same shape as commit_qm31_keep_hc below
+    // but consumes named GPU buffers rather than taking an array, since the
+    // two sites have historically-named binding variables.
+    let gpu_permute_to_hc = |d_in: &DeviceBuffer<u32>| -> DeviceBuffer<u32> {
+        let mut out = DeviceBuffer::<u32>::alloc(eval_size);
+        unsafe {
+            ffi::cuda_permute_canonic_brt_to_hc_natural(
+                d_in.as_ptr(), out.as_mut_ptr(),
+                eval_size as u32, log_eval_size,
+            );
+        }
+        out
+    };
+
+    let (interaction_commitment, tile_roots_logup, host_logup, d_logup_hc) = {
+        // Copy to host for later decommit work (host_logup is used by
+        // decommit_from_host_soa4). The hc-natural version stays on GPU
+        // for phase3's quotient kernel — no H→D→H→D round trip.
         let cn = [d_logup0.to_host(), d_logup1.to_host(), d_logup2.to_host(), d_logup3.to_host()];
-        let hc: [Vec<u32>; 4] = {
-            use rayon::prelude::*;
-            let vs: Vec<Vec<u32>> = (0..4usize).into_par_iter()
-                .map(|i| Coset::permute_canonic_brt_to_hc_natural(&cn[i], log_eval_size))
-                .collect();
-            vs.try_into().expect("par_iter produced exactly 4 elements")
-        };
+        let d_hc: [DeviceBuffer<u32>; 4] = [
+            gpu_permute_to_hc(&d_logup0), gpu_permute_to_hc(&d_logup1),
+            gpu_permute_to_hc(&d_logup2), gpu_permute_to_hc(&d_logup3),
+        ];
+        unsafe { ffi::cuda_device_sync(); }
         let (root, tiles) = MerkleTree::commit_root_soa4_with_subtrees(&d_logup0, &d_logup1, &d_logup2, &d_logup3, log_eval_size);
         drop(d_logup0); drop(d_logup1); drop(d_logup2); drop(d_logup3);
-        (root, tiles, cn, hc)
+        (root, tiles, cn, d_hc)
     };
     channel.mix_digest(&interaction_commitment);
 
-    let (rc_interaction_commitment, tile_roots_rc, host_rc_logup, host_rc_logup_hc) = {
+    let (rc_interaction_commitment, tile_roots_rc, host_rc_logup, d_rc_logup_hc) = {
         let cn = [rc_d0.to_host(), rc_d1.to_host(), rc_d2.to_host(), rc_d3.to_host()];
-        let hc: [Vec<u32>; 4] = {
-            use rayon::prelude::*;
-            let vs: Vec<Vec<u32>> = (0..4usize).into_par_iter()
-                .map(|i| Coset::permute_canonic_brt_to_hc_natural(&cn[i], log_eval_size))
-                .collect();
-            vs.try_into().expect("par_iter produced exactly 4 elements")
-        };
+        let d_hc: [DeviceBuffer<u32>; 4] = [
+            gpu_permute_to_hc(&rc_d0), gpu_permute_to_hc(&rc_d1),
+            gpu_permute_to_hc(&rc_d2), gpu_permute_to_hc(&rc_d3),
+        ];
+        unsafe { ffi::cuda_device_sync(); }
         let (root, tiles) = MerkleTree::commit_root_soa4_with_subtrees(&rc_d0, &rc_d1, &rc_d2, &rc_d3, log_eval_size);
         drop(rc_d0); drop(rc_d1); drop(rc_d2); drop(rc_d3);
-        (root, tiles, cn, hc)
+        (root, tiles, cn, d_hc)
     };
     channel.mix_digest(&rc_interaction_commitment);
 
@@ -1876,14 +1887,11 @@ fn cairo_prove_cached_with_columns(
     q3_tag("trans_factor_compute");
 
     // Upload interaction columns + T/U intermediate columns for constraint kernel.
-    let d_slogup0 = DeviceBuffer::from_host(&host_logup_hc[0]);
-    let d_slogup1 = DeviceBuffer::from_host(&host_logup_hc[1]);
-    let d_slogup2 = DeviceBuffer::from_host(&host_logup_hc[2]);
-    let d_slogup3 = DeviceBuffer::from_host(&host_logup_hc[3]);
-    let d_src0 = DeviceBuffer::from_host(&host_rc_logup_hc[0]);
-    let d_src1 = DeviceBuffer::from_host(&host_rc_logup_hc[1]);
-    let d_src2 = DeviceBuffer::from_host(&host_rc_logup_hc[2]);
-    let d_src3 = DeviceBuffer::from_host(&host_rc_logup_hc[3]);
+    // logup, rc_logup are now GPU-resident from commit phase — move out of
+    // d_logup_hc / d_rc_logup_hc. sdict is still built via the old path
+    // (see `host_sdict_hc` allocation) so it still needs uploading.
+    let [d_slogup0, d_slogup1, d_slogup2, d_slogup3] = d_logup_hc;
+    let [d_src0, d_src1, d_src2, d_src3] = d_rc_logup_hc;
     let d_sd0 = DeviceBuffer::from_host(&host_sdict_hc[0]);
     let d_sd1 = DeviceBuffer::from_host(&host_sdict_hc[1]);
     let d_sd2 = DeviceBuffer::from_host(&host_sdict_hc[2]);
