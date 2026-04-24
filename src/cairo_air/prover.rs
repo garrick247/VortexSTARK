@@ -2996,10 +2996,11 @@ pub fn cairo_verify(proof: &CairoProof) -> Result<(), String> {
         return Err(format!("dict_side_table length {} exceeds trace size",
             proof.dict_side_table.len()));
     }
-    if proof.query_indices.len() > max_queries {
-        return Err(format!("query_indices length {} exceeds cap",
+    if proof.query_indices.len() != N_QUERIES {
+        return Err(format!("query_indices length {} != N_QUERIES ({N_QUERIES})",
             proof.query_indices.len()));
     }
+    let _ = max_queries; // retained for future loose-cap checks
     if proof.fri_commitments.len() > (log_eval_size as usize) + 2 {
         return Err(format!("fri_commitments length {} exceeds log_eval_size + 2",
             proof.fri_commitments.len()));
