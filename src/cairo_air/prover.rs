@@ -3556,7 +3556,19 @@ pub fn cairo_verify(proof: &CairoProof) -> Result<(), String> {
     //   Tree 6 (quotient, 4 cols × 1 sample): col_k_at_z.
     {
         use crate::oods::OodsPoint;
-        let _z = OodsPoint::from_channel(&mut channel);
+        // Draw OODS point z from the Fiat-Shamir channel and verify that
+        // proof.oods_z matches. Without this check, a malicious prover
+        // could freely pick the OODS point after seeing commitments,
+        // breaking the OODS soundness argument. The channel-derived z
+        // is authoritative; proof.oods_z is just a ser/deser aid.
+        let channel_z = OodsPoint::from_channel(&mut channel);
+        let channel_z_arr = channel_z.to_u32_array();
+        if channel_z_arr != proof.oods_z {
+            return Err(format!(
+                "oods_z mismatch: proof claims {:?}, channel derives {:?} — \
+                 prover may have forged an OODS point outside Fiat-Shamir",
+                proof.oods_z, channel_z_arr));
+        }
         let n_trace = proof.oods_trace_at_z.len().min(proof.oods_trace_at_z_next.len());
         let mut combined: Vec<crate::field::QM31> =
             Vec::with_capacity(n_trace * 2 + 12 * 2 + 4);
@@ -3774,6 +3786,10 @@ pub fn cairo_verify(proof: &CairoProof) -> Result<(), String> {
             || proof.ec_trace_auth_paths_hi.len() != n_q
             || proof.ec_trace_auth_paths_hi_next.len() != n_q {
             return Err("EC trace auth path length mismatch".into());
+        }
+        if proof.ec_trace_at_queries.len() != n_q || proof.ec_trace_at_queries_next.len() != n_q {
+            return Err(format!("ec_trace_at_queries length mismatch: expected {n_q}, got {} / {}",
+                proof.ec_trace_at_queries.len(), proof.ec_trace_at_queries_next.len()));
         }
         if proof.ec_trace_auth_paths.iter().all(|p| p.is_empty()) {
             return Err("EC trace lo auth paths are empty — commitment unverified".into());
@@ -4847,6 +4863,22 @@ mod tests {
         proof.public_inputs.program = vec![0; 1024];
         let err = cairo_verify(&proof).expect_err("oversized program must be rejected");
         assert!(err.contains("program length"), "error: {err}");
+    }
+
+    #[test]
+    fn test_verifier_rejects_forged_oods_z() {
+        // The OODS point z MUST be derived from the Fiat-Shamir channel
+        // AFTER trace commitments are mixed. A prover freely choosing z
+        // after seeing commitments could forge OODS values. Verifier
+        // now compares proof.oods_z to the channel-derived value.
+        ffi::init_memory_pool();
+        let program = build_fib_program(64);
+        let mut proof = cairo_prove(&program, 64, 6);
+        cairo_verify(&proof).expect("unmodified proof must verify");
+        // Flip one u32 of oods_z.
+        proof.oods_z[0] ^= 1;
+        let err = cairo_verify(&proof).expect_err("forged oods_z must be rejected");
+        assert!(err.contains("oods_z"), "error should name oods_z, got: {err}");
     }
 
     #[test]
