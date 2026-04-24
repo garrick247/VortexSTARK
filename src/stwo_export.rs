@@ -1054,6 +1054,7 @@ mod tests {
 
     /// Item 2 (all-trees): verify all 7 Merkle witnesses in a single prove+export run.
     #[test]
+    #[cfg(not(feature = "shinobi-hash"))]
     fn test_two_verify_all_trees_merkle() {
         use crate::cairo_air::prover::cairo_prove;
         use crate::cuda::ffi;
@@ -1097,6 +1098,7 @@ mod tests {
     /// reconstructs the Merkle root bottom-up. The result must match `commitments[3]`
     /// (the `interaction_commitment` in the original proof).
     #[test]
+    #[cfg(not(feature = "shinobi-hash"))]
     fn test_hash_witness_round_trip_interaction_tree() {
         use crate::cairo_air::prover::cairo_prove;
         use crate::cuda::ffi;
@@ -1153,6 +1155,7 @@ mod tests {
     /// This is the definitive proof that VortexSTARK's Merkle leaf/node format is
     /// byte-for-byte identical to stwo's Blake2sMerkleHasher format.
     #[test]
+    #[cfg(not(feature = "shinobi-hash"))]
     fn test_stwo_merkle_verifier_interaction_tree() {
         use crate::cairo_air::prover::cairo_prove;
         use crate::cuda::ffi;
@@ -1225,6 +1228,7 @@ mod tests {
     /// Trees 3-6: single query set (current row only).
     /// Trees 0-2: merged current+next positions (trace next-row constraints).
     #[test]
+    #[cfg(not(feature = "shinobi-hash"))]
     fn test_stwo_merkle_verifier_all_trees() {
         use crate::cairo_air::prover::cairo_prove;
         use crate::cuda::ffi;
@@ -1484,6 +1488,7 @@ mod tests {
     ///   - first_layer (OODS quotient, circle domain log_size=log_eval)
     ///   - inner_layers[i] (line domain log_size=log_eval-1-i)
     #[test]
+    #[cfg(not(feature = "shinobi-hash"))]
     fn test_stwo_fri_merkle_witnesses() {
         use crate::cairo_air::prover::cairo_prove;
         use crate::cuda::ffi;
@@ -1879,6 +1884,7 @@ mod tests {
     /// by successful decommitment.
     ///
     #[test]
+    #[cfg(not(feature = "shinobi-hash"))]
     fn test_stwo_fri_verifier_e2e() {
         use crate::cairo_air::decode::Instruction;
         use crate::cairo_air::prover::cairo_prove;

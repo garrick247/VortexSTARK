@@ -2203,6 +2203,17 @@ fn cpu_merkle_auth_paths(values: &[QM31], indices: &[usize]) -> Vec<Vec<[u32; 8]
     let n = values.len();
     assert!(n.is_power_of_two() && n >= 1);
 
+    // shinobi-hash: must match `merkle_root_cpu` which reduces every
+    // layer's hash words to M31 range. Without this, auth paths point
+    // at raw Blake2s nodes while the committed root is reduced → fail.
+    #[cfg(feature = "shinobi-hash")]
+    let reduce_words = |mut w: [u32; 8]| -> [u32; 8] {
+        w = crate::blake2s_m31::reduce_words_to_m31(w);
+        w
+    };
+    #[cfg(not(feature = "shinobi-hash"))]
+    let reduce_words = |w: [u32; 8]| -> [u32; 8] { w };
+
     // Hash leaves
     let leaf_hashes: Vec<[u32; 8]> = values
         .iter()
@@ -2217,7 +2228,7 @@ fn cpu_merkle_auth_paths(values: &[QM31], indices: &[usize]) -> Vec<Vec<[u32; 8]
             for i in 0..8 {
                 out[i] = u32::from_le_bytes([h[i*4], h[i*4+1], h[i*4+2], h[i*4+3]]);
             }
-            out
+            reduce_words(out)
         })
         .collect();
 
@@ -2240,7 +2251,7 @@ fn cpu_merkle_auth_paths(values: &[QM31], indices: &[usize]) -> Vec<Vec<[u32; 8]
                 for k in 0..8 {
                     out[k] = u32::from_le_bytes([h[k*4], h[k*4+1], h[k*4+2], h[k*4+3]]);
                 }
-                out
+                reduce_words(out)
             })
             .collect();
         layers.push(parents);

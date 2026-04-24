@@ -527,6 +527,12 @@ impl MerkleTree {
                     hash_bytes[i * 4 + 3],
                 ]);
             }
+            // shinobi-hash: mirror the GPU STORE_HASH8 reduction so the
+            // reconstructed node hash matches what the prover committed.
+            #[cfg(feature = "shinobi-hash")]
+            {
+                current = crate::blake2s_m31::reduce_words_to_m31(current);
+            }
             index /= 2;
         }
 
@@ -551,6 +557,11 @@ impl MerkleTree {
                 hash_bytes[i * 4 + 2],
                 hash_bytes[i * 4 + 3],
             ]);
+        }
+        // shinobi-hash: mirror the GPU leaf kernel's STORE_HASH8.
+        #[cfg(feature = "shinobi-hash")]
+        {
+            out = crate::blake2s_m31::reduce_words_to_m31(out);
         }
         out
     }
@@ -838,6 +849,11 @@ impl MerkleTree {
         for k in 0..HASH_WORDS {
             out[k] = u32::from_le_bytes([h[k * 4], h[k * 4 + 1], h[k * 4 + 2], h[k * 4 + 3]]);
         }
+        // shinobi-hash: mirror the GPU node kernel's STORE_HASH8.
+        #[cfg(feature = "shinobi-hash")]
+        {
+            out = crate::blake2s_m31::reduce_words_to_m31(out);
+        }
         out
     }
 
@@ -935,6 +951,77 @@ impl MerkleTree {
 mod tests {
     use super::*;
     use crate::field::m31::P;
+
+    /// End-to-end: build commit_soa4 under shinobi-hash, extract an
+    /// auth path for a random index, verify it against the root. If
+    /// this fails, the tree layers returned by batch_auth_paths
+    /// disagree with what verify_auth_path reconstructs, and the whole
+    /// shinobi-hash feature can't work end-to-end.
+    #[test]
+    #[cfg(feature = "shinobi-hash")]
+    fn test_commit_soa4_auth_path_roundtrip_shinobi() {
+        let log_n = 6u32;
+        let n = 1usize << log_n;
+        let cols: [Vec<u32>; 4] = [
+            (0..n).map(|i| (i as u32 * 7 + 3) % P).collect(),
+            (0..n).map(|i| (i as u32 * 11 + 5) % P).collect(),
+            (0..n).map(|i| (i as u32 * 13 + 17) % P).collect(),
+            (0..n).map(|i| (i as u32 * 19 + 23) % P).collect(),
+        ];
+        let d0 = DeviceBuffer::from_host(&cols[0]);
+        let d1 = DeviceBuffer::from_host(&cols[1]);
+        let d2 = DeviceBuffer::from_host(&cols[2]);
+        let d3 = DeviceBuffer::from_host(&cols[3]);
+        let tree = MerkleTree::commit_soa4(&d0, &d1, &d2, &d3, log_n);
+        let root = tree.root();
+
+        let indices = vec![29usize, 0, 1, (n - 1)];
+        let paths = tree.batch_auth_paths(&indices);
+        for (i, &qi) in indices.iter().enumerate() {
+            let leaf_values = [cols[0][qi], cols[1][qi], cols[2][qi], cols[3][qi]];
+            let leaf_hash = MerkleTree::hash_leaf(&leaf_values);
+            assert!(
+                MerkleTree::verify_auth_path(&root, &leaf_hash, qi, &paths[i]),
+                "shinobi-hash auth path failed at index {qi} (log_n={log_n})",
+            );
+        }
+    }
+
+    /// Under shinobi-hash, the CPU mirror (hash_leaf + hash_pair) must
+    /// produce the exact same root as GPU commit_soa4. This test
+    /// catches any divergence between the on-device STORE_HASH8 /
+    /// REDUCE_HASH_REGS hooks and the CPU `reduce_words_to_m31` helper.
+    #[test]
+    #[cfg(feature = "shinobi-hash")]
+    fn test_commit_soa4_gpu_matches_cpu_shinobi() {
+        for log_n in [4u32, 6, 7, 8] {
+            let n = 1usize << log_n;
+            // Deterministic M31-range data across 4 cols.
+            let cols: [Vec<u32>; 4] = [
+                (0..n).map(|i| (i as u32 * 7 + 3) % P).collect(),
+                (0..n).map(|i| (i as u32 * 11 + 5) % P).collect(),
+                (0..n).map(|i| (i as u32 * 13 + 17) % P).collect(),
+                (0..n).map(|i| (i as u32 * 19 + 23) % P).collect(),
+            ];
+            let d0 = DeviceBuffer::from_host(&cols[0]);
+            let d1 = DeviceBuffer::from_host(&cols[1]);
+            let d2 = DeviceBuffer::from_host(&cols[2]);
+            let d3 = DeviceBuffer::from_host(&cols[3]);
+            let tree = MerkleTree::commit_soa4(&d0, &d1, &d2, &d3, log_n);
+            let gpu_root = tree.root();
+
+            // CPU mirror: hash each leaf, then reduce_to_root.
+            let leaf_hashes: Vec<[u32; HASH_WORDS]> = (0..n)
+                .map(|i| MerkleTree::hash_leaf(&[cols[0][i], cols[1][i], cols[2][i], cols[3][i]]))
+                .collect();
+            let cpu_root = MerkleTree::reduce_to_root(leaf_hashes);
+
+            assert_eq!(
+                gpu_root, cpu_root,
+                "shinobi-hash GPU/CPU root mismatch at log_n={log_n}",
+            );
+        }
+    }
 
     #[test]
     fn test_merkle_commit_deterministic() {

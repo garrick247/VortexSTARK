@@ -434,6 +434,24 @@ pub fn merkle_root_cpu(values: &[QM31]) -> [u32; 8] {
     let n = values.len();
     assert!(n.is_power_of_two() && n >= 1);
 
+    // shinobi-hash: per-layer M31 reduction on the 32-byte digest to
+    // match the GPU Merkle kernels' STORE_HASH8 and the CPU
+    // MerkleTree::hash_leaf / hash_pair mirrors. Without this the CPU
+    // tail FRI trees commit to raw Blake2s output while the rest of
+    // the Merkle surface reduces — roots diverge.
+    #[cfg(feature = "shinobi-hash")]
+    let reduce_bytes = |mut digest: [u8; 32]| -> [u8; 32] {
+        use crate::field::m31::M31;
+        for i in 0..8 {
+            let word = u32::from_le_bytes(digest[i * 4..(i + 1) * 4].try_into().unwrap());
+            let reduced = M31::reduce(word as u64).0;
+            digest[i * 4..(i + 1) * 4].copy_from_slice(&reduced.to_le_bytes());
+        }
+        digest
+    };
+    #[cfg(not(feature = "shinobi-hash"))]
+    let reduce_bytes = |digest: [u8; 32]| -> [u8; 32] { digest };
+
     // Hash leaves: each QM31 → 4 u32 → 16-byte message → Blake2s
     let mut hashes: Vec<[u8; 32]> = values
         .iter()
@@ -443,10 +461,7 @@ pub fn merkle_root_cpu(values: &[QM31]) -> [u32; 8] {
             for (i, &w) in arr.iter().enumerate() {
                 input[i * 4..i * 4 + 4].copy_from_slice(&w.to_le_bytes());
             }
-            // Blake2s with t=16 (4 words × 4 bytes)
-            // The blake2s_hash function uses input.len() as t, but we need t=16.
-            // Pass a 16-byte slice to get the correct t value.
-            blake2s_hash(&input[..16])
+            reduce_bytes(blake2s_hash(&input[..16]))
         })
         .collect();
 
@@ -458,7 +473,7 @@ pub fn merkle_root_cpu(values: &[QM31]) -> [u32; 8] {
                 let mut input = [0u8; 64];
                 input[..32].copy_from_slice(&hashes[2 * i]);
                 input[32..64].copy_from_slice(&hashes[2 * i + 1]);
-                blake2s_hash_node(&input)
+                reduce_bytes(blake2s_hash_node(&input))
             })
             .collect();
     }

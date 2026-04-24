@@ -89,6 +89,14 @@ fn main() {
         let mut cmd = Command::new(&nvcc);
         cmd.args(["-c", "-O3"]);
 
+        // shinobi-hash feature: define SHINOBI_HASH_REDUCE so every
+        // Blake2s hash output is post-reduced to M31 range in the GPU
+        // kernels (matches upstream Blake2sM31). Macro is defined in
+        // cuda/include/blake2s.cuh.
+        if env::var("CARGO_FEATURE_SHINOBI_HASH").is_ok() {
+            cmd.args(["-DSHINOBI_HASH_REDUCE=1"]);
+        }
+
         // On Windows, nvcc may reject newer MSVC/SDK versions as an unsupported host compiler.
         // Use an older MSVC (14.44 / VS 2022) and an older Windows SDK (22621) for CUDA
         // host compilation, which CUDA 13.x is known to support.

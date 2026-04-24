@@ -57,8 +57,7 @@ __global__ void merkle_hash_leaves_kernel(
                      leaf_len, 0xFFFFFFFF);
 
     uint32_t* out = &hashes[leaf * 8];
-    out[0]=h0; out[1]=h1; out[2]=h2; out[3]=h3;
-    out[4]=h4; out[5]=h5; out[6]=h6; out[7]=h7;
+    STORE_HASH8(out, h0, h1, h2, h3, h4, h5, h6, h7);
 }
 
 // Hash internal node: two 32-byte children → one 32-byte parent
@@ -84,8 +83,7 @@ __global__ void merkle_hash_nodes_kernel(
                      64, 0xFFFFFFFF);
 
     uint32_t* out = &parents[i * 8];
-    out[0]=h0; out[1]=h1; out[2]=h2; out[3]=h3;
-    out[4]=h4; out[5]=h5; out[6]=h6; out[7]=h7;
+    STORE_HASH8(out, h0, h1, h2, h3, h4, h5, h6, h7);
 }
 
 // Single-kernel Merkle commit for small 4-column SoA trees (≤ 2048 leaves).
@@ -127,6 +125,12 @@ __global__ void merkle_commit_small_soa4_kernel(
                          0,0,0,0, 0,0,0,0, 0,0,0,0,
                          16, 0xFFFFFFFF);
 
+        // shinobi-hash: reduce leaf hashes before feeding them into
+        // the merge. Matches the CPU pipeline where `hash_leaf` stores
+        // an already-reduced value that `hash_pair` then consumes.
+        REDUCE_HASH_REGS(lh0,lh1,lh2,lh3,lh4,lh5,lh6,lh7);
+        REDUCE_HASH_REGS(rh0,rh1,rh2,rh3,rh4,rh5,rh6,rh7);
+
         // Merge: hash the two leaf hashes (internal node domain)
         uint32_t ph0=IV0^0x01010020, ph1=IV1, ph2=IV2, ph3=IV3;
         uint32_t ph4=IV4, ph5=IV5, ph6=IV6_NODE, ph7=IV7;
@@ -135,10 +139,11 @@ __global__ void merkle_commit_small_soa4_kernel(
                          rh0,rh1,rh2,rh3,rh4,rh5,rh6,rh7,
                          64, 0xFFFFFFFF);
 
-        // Store in shared memory
+        // Store in shared memory — reduced under shinobi-hash so child
+        // reads at the next level see bytes that round-trip through
+        // M31::reduce, matching upstream Blake2sM31.
         uint32_t* dst = &smem[tid * 8];
-        dst[0]=ph0; dst[1]=ph1; dst[2]=ph2; dst[3]=ph3;
-        dst[4]=ph4; dst[5]=ph5; dst[6]=ph6; dst[7]=ph7;
+        STORE_HASH8(dst, ph0, ph1, ph2, ph3, ph4, ph5, ph6, ph7);
     }
     __syncthreads();
 
@@ -169,14 +174,14 @@ __global__ void merkle_commit_small_soa4_kernel(
                              64, 0xFFFFFFFF);
 
             uint32_t* dst = &smem[tid * 8];
-            dst[0]=h0; dst[1]=h1; dst[2]=h2; dst[3]=h3;
-            dst[4]=h4; dst[5]=h5; dst[6]=h6; dst[7]=h7;
+            STORE_HASH8(dst, h0, h1, h2, h3, h4, h5, h6, h7);
         }
         __syncthreads(); // all writes done before next iteration
         level_size = half;
     }
 
-    // Write root from thread 0
+    // Write root from thread 0 (smem already reduced under shinobi-hash
+    // via the stores above — this is a pure memcpy).
     if (tid == 0) {
         root_out[0]=smem[0]; root_out[1]=smem[1]; root_out[2]=smem[2]; root_out[3]=smem[3];
         root_out[4]=smem[4]; root_out[5]=smem[5]; root_out[6]=smem[6]; root_out[7]=smem[7];
@@ -217,6 +222,11 @@ __global__ void merkle_hash_leaves_and_merge_soa4_kernel(
                      0,0,0,0, 0,0,0,0, 0,0,0,0,
                      16, 0xFFFFFFFF);
 
+    // shinobi-hash: reduce leaf hashes before merge (see comment in
+    // merkle_commit_small_soa4_kernel).
+    REDUCE_HASH_REGS(lh0,lh1,lh2,lh3,lh4,lh5,lh6,lh7);
+    REDUCE_HASH_REGS(rh0,rh1,rh2,rh3,rh4,rh5,rh6,rh7);
+
     // Hash the two leaf hashes together (internal node domain)
     uint32_t ph0=IV0^0x01010020, ph1=IV1, ph2=IV2, ph3=IV3;
     uint32_t ph4=IV4, ph5=IV5, ph6=IV6_NODE, ph7=IV7;
@@ -226,8 +236,7 @@ __global__ void merkle_hash_leaves_and_merge_soa4_kernel(
                      64, 0xFFFFFFFF);
 
     uint32_t* out = &parents[pair * 8];
-    out[0]=ph0; out[1]=ph1; out[2]=ph2; out[3]=ph3;
-    out[4]=ph4; out[5]=ph5; out[6]=ph6; out[7]=ph7;
+    STORE_HASH8(out, ph0, ph1, ph2, ph3, ph4, ph5, ph6, ph7);
 }
 
 // Reduce a small hash array (≤ 1024 nodes) to a single root in shared memory.
@@ -275,8 +284,7 @@ __global__ void merkle_reduce_to_root_kernel(
                              64, 0xFFFFFFFF);
 
             uint32_t* dst = &smem[tid * 8];
-            dst[0]=h0; dst[1]=h1; dst[2]=h2; dst[3]=h3;
-            dst[4]=h4; dst[5]=h5; dst[6]=h6; dst[7]=h7;
+            STORE_HASH8(dst, h0, h1, h2, h3, h4, h5, h6, h7);
         }
         __syncthreads(); // all writes done before next iteration
         level_size = half;
@@ -328,6 +336,10 @@ __global__ void merkle_tiled_soa4_kernel(
                          0,0,0,0, 0,0,0,0, 0,0,0,0,
                          16, 0xFFFFFFFF);
 
+        // shinobi-hash: reduce leaf hashes before merge.
+        REDUCE_HASH_REGS(lh0,lh1,lh2,lh3,lh4,lh5,lh6,lh7);
+        REDUCE_HASH_REGS(rh0,rh1,rh2,rh3,rh4,rh5,rh6,rh7);
+
         // Merge: hash both leaf hashes (internal node domain)
         uint32_t ph0=IV0^0x01010020, ph1=IV1, ph2=IV2, ph3=IV3;
         uint32_t ph4=IV4, ph5=IV5, ph6=IV6_NODE, ph7=IV7;
@@ -337,8 +349,7 @@ __global__ void merkle_tiled_soa4_kernel(
                          64, 0xFFFFFFFF);
 
         uint32_t* dst = &smem[tid * 8];
-        dst[0]=ph0; dst[1]=ph1; dst[2]=ph2; dst[3]=ph3;
-        dst[4]=ph4; dst[5]=ph5; dst[6]=ph6; dst[7]=ph7;
+        STORE_HASH8(dst, ph0, ph1, ph2, ph3, ph4, ph5, ph6, ph7);
     }
     __syncthreads();
 
@@ -371,8 +382,7 @@ __global__ void merkle_tiled_soa4_kernel(
                              64, 0xFFFFFFFF);
 
             uint32_t* dst = &smem[tid * 8];
-            dst[0]=h0; dst[1]=h1; dst[2]=h2; dst[3]=h3;
-            dst[4]=h4; dst[5]=h5; dst[6]=h6; dst[7]=h7;
+            STORE_HASH8(dst, h0, h1, h2, h3, h4, h5, h6, h7);
         }
         __syncthreads(); // all writes done before next iteration
         level_size = half;
@@ -465,6 +475,10 @@ __global__ void merkle_tiled_generic_kernel(
                          m8,m9,m10,m11,m12,m13,m14,m15,
                          leaf_len, 0xFFFFFFFF);
 
+        // shinobi-hash: reduce leaf hashes before merge.
+        REDUCE_HASH_REGS(lh0,lh1,lh2,lh3,lh4,lh5,lh6,lh7);
+        REDUCE_HASH_REGS(rh0,rh1,rh2,rh3,rh4,rh5,rh6,rh7);
+
         // Merge: hash both leaf hashes (internal node domain)
         uint32_t ph0=IV0^0x01010020, ph1=IV1, ph2=IV2, ph3=IV3;
         uint32_t ph4=IV4, ph5=IV5, ph6=IV6_NODE, ph7=IV7;
@@ -474,8 +488,7 @@ __global__ void merkle_tiled_generic_kernel(
                          64, 0xFFFFFFFF);
 
         uint32_t* dst = &smem[tid * 8];
-        dst[0]=ph0; dst[1]=ph1; dst[2]=ph2; dst[3]=ph3;
-        dst[4]=ph4; dst[5]=ph5; dst[6]=ph6; dst[7]=ph7;
+        STORE_HASH8(dst, ph0, ph1, ph2, ph3, ph4, ph5, ph6, ph7);
     }
     __syncthreads();
 
@@ -504,8 +517,7 @@ __global__ void merkle_tiled_generic_kernel(
                              64, 0xFFFFFFFF);
 
             uint32_t* dst = &smem[tid * 8];
-            dst[0]=h0; dst[1]=h1; dst[2]=h2; dst[3]=h3;
-            dst[4]=h4; dst[5]=h5; dst[6]=h6; dst[7]=h7;
+            STORE_HASH8(dst, h0, h1, h2, h3, h4, h5, h6, h7);
         }
         __syncthreads();
         level_size = half;

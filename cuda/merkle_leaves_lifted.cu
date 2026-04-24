@@ -91,10 +91,10 @@ __global__ void build_leaves_lifted_kernel(
                      buf[12], buf[13], buf[14], buf[15],
                      total_bytes, 0xFFFFFFFF);
 
-    // Write the 8-word hash to output.
+    // Write the 8-word hash to output. Under shinobi-hash,
+    // STORE_HASH8 folds each word to M31 range via m31_reduce_hash_word.
     uint32_t* out = &output_hashes[leaf * 8];
-    out[0] = h0; out[1] = h1; out[2] = h2; out[3] = h3;
-    out[4] = h4; out[5] = h5; out[6] = h6; out[7] = h7;
+    STORE_HASH8(out, h0, h1, h2, h3, h4, h5, h6, h7);
 }
 
 // ─── C wrapper for Rust FFI ─────────────────────────────────────────────

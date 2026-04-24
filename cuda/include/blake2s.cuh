@@ -11,6 +11,47 @@
 #define IV6 0x1F83D9ABu
 #define IV7 0x5BE0CD19u
 
+// M31 reduction used by the `shinobi-hash` feature to post-process
+// every Blake2s hash-output word into `[0, P-1]` before it's stored.
+// Matches the CPU reference `M31::reduce` in `src/field/m31.rs`:
+//
+//   lo = v & P; hi = v >> 31; r = lo + hi; canon(r).
+//
+// Gated by `SHINOBI_HASH_REDUCE`, which `build.rs` defines when the
+// cargo feature is active. Identity function when the feature is off
+// — no runtime cost, same binary as default.
+__device__ __forceinline__ uint32_t m31_reduce_hash_word(uint32_t v) {
+#ifdef SHINOBI_HASH_REDUCE
+    uint32_t lo = v & 0x7FFFFFFFu;
+    uint32_t hi = v >> 31;
+    uint32_t r  = lo + hi;
+    return (r >= 0x7FFFFFFFu) ? (r - 0x7FFFFFFFu) : r;
+#else
+    return v;
+#endif
+}
+// Convenience: apply m31_reduce_hash_word across an 8-word hash digest
+// stored at `dst`. Written so callers can `STORE_HASH8(dst, h0..h7);`.
+#define STORE_HASH8(dst, h0, h1, h2, h3, h4, h5, h6, h7) do { \
+    (dst)[0] = m31_reduce_hash_word(h0); (dst)[1] = m31_reduce_hash_word(h1); \
+    (dst)[2] = m31_reduce_hash_word(h2); (dst)[3] = m31_reduce_hash_word(h3); \
+    (dst)[4] = m31_reduce_hash_word(h4); (dst)[5] = m31_reduce_hash_word(h5); \
+    (dst)[6] = m31_reduce_hash_word(h6); (dst)[7] = m31_reduce_hash_word(h7); \
+} while(0)
+
+// Reduce an 8-register hash digest in place. Needed in fused
+// leaf+merge kernels where the leaf hash is consumed directly from
+// registers (no store → no STORE_HASH8 hook). Without this, the
+// child bytes fed into the merge blake2s_compress differ from the
+// CPU mirror's (which feeds reduced leaf hashes via hash_pair), and
+// roots diverge.
+#define REDUCE_HASH_REGS(h0, h1, h2, h3, h4, h5, h6, h7) do { \
+    (h0) = m31_reduce_hash_word(h0); (h1) = m31_reduce_hash_word(h1); \
+    (h2) = m31_reduce_hash_word(h2); (h3) = m31_reduce_hash_word(h3); \
+    (h4) = m31_reduce_hash_word(h4); (h5) = m31_reduce_hash_word(h5); \
+    (h6) = m31_reduce_hash_word(h6); (h7) = m31_reduce_hash_word(h7); \
+} while(0)
+
 __device__ __forceinline__ uint32_t rotr32(uint32_t x, int n) {
     return __funnelshift_r(x, x, n);
 }
