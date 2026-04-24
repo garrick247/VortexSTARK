@@ -18,4 +18,5 @@ pub mod oods;
 pub mod stark252;
 pub mod stwo_export;
 pub mod circuit_serialize;
+pub mod blake2s_m31;
 pub mod snip36;
