@@ -208,15 +208,24 @@ pub fn vm_pedersen_invoke(
 ///   base + inv*5 + 3: x ^ y  (XOR)
 ///   base + inv*5 + 4: x | y  (OR)
 ///
-/// Algebraic constraints (2 per row, evaluated as M31 elements):
-///   C0: xor + 2*and - x - y = 0   (follows from bit-level identity)
-///   C1: or - and - xor = 0         (OR = AND + XOR, bitwise)
+/// Soundness: committed-data + verifier-native-recompute, NOT algebraic.
 ///
-/// **Limitation:** These constraints hold as *integer* equalities and therefore
-/// hold mod P for inputs x, y < 2^15. For inputs in the full M31 range (up to
-/// 2^31-2), x+y may wrap around mod P, making the constraints satisfiable by
-/// incorrect and/xor/or values. Full soundness requires bit-decomposition into
-/// 16-bit chunks, which is not implemented here.
+/// Per-row bitwise correctness is enforced at verify time by recomputing
+/// `(x & y, x ^ y, x | y)` directly (`src/cairo_air/prover.rs` line ~3608)
+/// after authenticating `bitwise_rows` via `bitwise_commitment` (Blake2s
+/// root committed into Fiat-Shamir before any downstream challenges are
+/// drawn). Forging (and, xor, or) for a given (x, y) is detected at this
+/// check.
+///
+/// The link to main-trace memory is separately enforced via the bitwise
+/// bus check (prover.rs line ~3689): every `memory_table_data` entry at
+/// an address in the bitwise builtin's segment must match the
+/// corresponding row of `bitwise_rows`, so a prover cannot substitute
+/// different (x, y) values than what the VM actually read.
+///
+/// **No input bound.** All 32 bits are supported soundly — the earlier
+/// `2^15` limitation applied to a constraint-only path that has since
+/// been subsumed by native recomputation.
 pub struct BitwiseBuiltin {
     /// Recorded (x, y) pairs in invocation order.
     pub inputs: Vec<(u32, u32)>,

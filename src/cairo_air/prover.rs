@@ -513,9 +513,10 @@ pub struct CairoProof {
     //   C0: xor + 2*and == x + y  (mod P)
     //   C1: or  == and + xor       (mod P)
     //
-    // These constraints hold for all well-formed bitwise invocations when inputs
-    // x, y < 2^15. For full M31 inputs (up to 2^31-2), x+y may overflow P causing
-    // a false positive — documented limitation (see SOUNDNESS.md).
+    // These algebraic constraints are NOT the soundness argument (they're
+    // non-uniquely satisfiable in general). Soundness comes from
+    // `bitwise_commitment` + native recompute at verify time (line ~3608)
+    // + the memory bus link (line ~3689). All 32-bit inputs are sound.
     //
     // The link between main trace memory accesses and bitwise rows is not yet proven
     // by a permutation argument (same status as dict sub-AIR before Stage 2).
@@ -1808,8 +1809,12 @@ fn cairo_prove_cached_with_columns(
         let flat: Vec<u32> = bitwise_rows.iter()
             .flat_map(|row| row.iter().copied())
             .collect();
-        // Blake2s hash of all bitwise data (8 × u32 = 32 bytes).
-        let hash = crate::merkle::MerkleTree::hash_leaf(&flat);
+        // Blake2s over the full flattened bitwise data. `hash_leaf` caps
+        // input at 16 u32 values (Merkle-leaf-sized), which silently
+        // truncated for >3 invocations. Use `hash_words` — accepts
+        // arbitrary length — matching every other unbounded commitment
+        // in this file (memory_table, rc_counts, dict_side_table).
+        let hash = crate::channel::hash_words(&flat);
         channel.mix_digest(&hash);
         Some(hash)
     } else {
@@ -3588,7 +3593,8 @@ pub fn cairo_verify(proof: &CairoProof) -> Result<(), String> {
         let flat: Vec<u32> = proof.bitwise_rows.iter()
             .flat_map(|row| row.iter().copied())
             .collect();
-        let recomputed_hash = crate::merkle::MerkleTree::hash_leaf(&flat);
+        // Mirror the prover's hash_words over the full flat payload.
+        let recomputed_hash = crate::channel::hash_words(&flat);
         match proof.bitwise_commitment {
             Some(committed) if committed != recomputed_hash =>
                 return Err(format!(
@@ -6439,14 +6445,46 @@ mod tests {
     #[test]
     fn test_bitwise_prove_verify_roundtrip() {
         ffi::init_memory_pool();
-        // All inputs must be < 2^15 (0x8000) for soundness. M1 fix: values >= 2^15 are
-        // rejected by both prover (cairo_prove_program path) and verifier.
+        // All 32 bits supported — soundness is via native recompute +
+        // memory bus link at verify time (not per-row algebra).
         let pairs = vec![(0b1010u32, 0b1100u32), (0x00FFu32, 0x00AAu32), (0u32, 0u32)];
         let proof = prove_with_bitwise(&pairs);
         assert_eq!(proof.bitwise_rows.len(), pairs.len());
         assert!(proof.bitwise_commitment.is_some());
-        // Verify: should pass — all inputs < 2^15.
         cairo_verify(&proof).expect("bitwise proof should verify");
+    }
+
+    /// Exhaustive edge-case coverage for 32-bit bitwise: verifies that
+    /// inputs spanning the full u32 range (including bits 30–31 being
+    /// set and pairs whose integer sum exceeds P) are all accepted.
+    /// Catches any regression that re-introduces a 2^15 bound at any
+    /// layer (hint layer, prover, verifier).
+    #[test]
+    fn test_bitwise_full_32bit_edge_cases() {
+        ffi::init_memory_pool();
+        let pairs: Vec<(u32, u32)> = vec![
+            (0x0000_0000, 0x0000_0000),             // zero × zero
+            (0xFFFF_FFFF, 0xFFFF_FFFF),             // all-ones × all-ones
+            (0xFFFF_FFFF, 0x0000_0000),             // all-ones × zero
+            (0x8000_0000, 0x8000_0000),             // MSB × MSB (x+y > u32)
+            (0x7FFF_FFFF, 0x7FFF_FFFF),             // P × P  (x+y ≥ P)
+            (0x4000_0000, 0x4000_0000),             // 2^30 × 2^30 (x+y = 2^31 = P+1)
+            (0xDEAD_BEEF, 0xCAFE_BABE),             // high-bit pattern
+            (0xFF00_FF00, 0x00FF_00FF),             // complementary byte mask
+            (0x8000_0001, 0x0000_0001),             // MSB + LSB
+            (0xAAAA_AAAA, 0x5555_5555),             // alternating bits
+        ];
+        let proof = prove_with_bitwise(&pairs);
+        cairo_verify(&proof).expect("all 32-bit bitwise pairs must verify");
+        // Sanity: rows carry the committed (x, y) verbatim, not reduced mod P.
+        for (i, &(x, y)) in pairs.iter().enumerate() {
+            assert_eq!(proof.bitwise_rows[i][0], x,
+                "row {i} x raw-bit preserved (committed value, not reduced)");
+            assert_eq!(proof.bitwise_rows[i][1], y, "row {i} y raw-bit preserved");
+            assert_eq!(proof.bitwise_rows[i][2], x & y, "row {i} AND");
+            assert_eq!(proof.bitwise_rows[i][3], x ^ y, "row {i} XOR");
+            assert_eq!(proof.bitwise_rows[i][4], x | y, "row {i} OR");
+        }
     }
 
     /// Large inputs (≥ 2^15) are now fully supported — the verifier
