@@ -2959,6 +2959,17 @@ pub fn cairo_verify(proof: &CairoProof) -> Result<(), String> {
              bytecode cannot exceed trace capacity",
             proof.public_inputs.program.len()));
     }
+    // initial_pc must point inside the committed bytecode; otherwise the
+    // first instruction fetch reads garbage. Memory-table argument would
+    // ultimately catch this, but an early range check is clearer than a
+    // downstream "memory table sum mismatch" error.
+    if (proof.public_inputs.initial_pc as usize) >= proof.public_inputs.program.len()
+        && !proof.public_inputs.program.is_empty()
+    {
+        return Err(format!(
+            "initial_pc {} >= program length {} — cannot execute from outside bytecode",
+            proof.public_inputs.initial_pc, proof.public_inputs.program.len()));
+    }
 
     // ---- Vec size sanity gates (DoS protection) ----
     // Bound every variable-length Vec in the proof against the claimed
@@ -4816,6 +4827,16 @@ mod tests {
         proof.public_inputs.program = vec![0; 1024];
         let err = cairo_verify(&proof).expect_err("oversized program must be rejected");
         assert!(err.contains("program length"), "error: {err}");
+    }
+
+    #[test]
+    fn test_verifier_rejects_initial_pc_out_of_program() {
+        ffi::init_memory_pool();
+        let program = build_fib_program(64);
+        let mut proof = cairo_prove(&program, 64, 6);
+        proof.public_inputs.initial_pc = proof.public_inputs.program.len() as u32 + 100;
+        let err = cairo_verify(&proof).expect_err("out-of-range initial_pc must be rejected");
+        assert!(err.contains("initial_pc") && err.contains("program length"), "error: {err}");
     }
 
     #[test]
