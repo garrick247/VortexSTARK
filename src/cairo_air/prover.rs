@@ -2929,21 +2929,15 @@ pub fn cairo_verify(proof: &CairoProof) -> Result<(), String> {
             proof.version, CAIRO_PROOF_VERSION
         ));
     }
-    // Independently recompute program_hash from the bytecode carried in
-    // public_inputs and reject any mismatch. This closes the prior
-    // "caller's responsibility" gap — the verifier now binds the proof
-    // to the exact bytecode it claims to have run.
-    {
-        let recomputed = compute_program_hash(&proof.public_inputs.program);
-        if recomputed != proof.public_inputs.program_hash {
-            return Err(format!(
-                "program_hash mismatch: public_inputs.program_hash = {:?} \
-                 but Blake2s(public_inputs.program) = {:?}",
-                proof.public_inputs.program_hash, recomputed
-            ));
-        }
-    }
     let log_n = proof.log_trace_size;
+    // Cap log_trace_size before any size-derived allocation. A proof claiming
+    // log_n=60 would cause the verifier to allocate 2^60-sized structures
+    // during setup. The real maximum is BLOWUP_BITS-limited and the GPU
+    // caps much lower, but we bound at 32 here as a defense-in-depth
+    // DoS gate — all honest proofs fit in log_n ≤ 30.
+    if log_n > 32 {
+        return Err(format!("log_trace_size {log_n} exceeds sanity cap 32"));
+    }
     let log_eval_size = log_n + BLOWUP_BITS;
     let eval_size = 1usize << log_eval_size;
 
@@ -2953,6 +2947,71 @@ pub fn cairo_verify(proof: &CairoProof) -> Result<(), String> {
     }
     if proof.public_inputs.n_steps > (1 << log_n) {
         return Err("More steps than trace size".into());
+    }
+    // Bound public_inputs.program length: loading the bytecode into the
+    // memory table is O(program.len()); a 1 GB program in a proof would
+    // OOM the verifier before later checks fire. Program instructions are
+    // 1–2 u64 words per step, so the bytecode fits comfortably inside
+    // 8× trace size.
+    if proof.public_inputs.program.len() > (1usize << log_n) * 8 {
+        return Err(format!(
+            "public_inputs.program length ({}) exceeds 8× trace size (2^{log_n} × 8) — \
+             bytecode cannot exceed trace capacity",
+            proof.public_inputs.program.len()));
+    }
+
+    // ---- Vec size sanity gates (DoS protection) ----
+    // Bound every variable-length Vec in the proof against the claimed
+    // trace size + query count. A malicious prover could otherwise ship
+    // gigabyte-sized Vecs that OOM the verifier before the real
+    // authentication checks kick in. Bounds are intentionally loose —
+    // the authentication checks below narrow them further.
+    let max_trace_len = 1usize << log_n;
+    let max_eval_len = 1usize << log_eval_size;
+    let max_queries = N_QUERIES * 8; // 8× slack to tolerate FRI round multipliers
+    if proof.memory_table_data.len() > max_trace_len * 4 {
+        return Err(format!("memory_table_data length {} exceeds 4× trace size",
+            proof.memory_table_data.len()));
+    }
+    if proof.memory_instr_data.len() > max_trace_len * 4 {
+        return Err(format!("memory_instr_data length {} exceeds 4× trace size",
+            proof.memory_instr_data.len()));
+    }
+    if proof.bitwise_rows.len() > max_trace_len {
+        return Err(format!("bitwise_rows length {} exceeds trace size",
+            proof.bitwise_rows.len()));
+    }
+    if proof.dict_side_table.len() > max_trace_len {
+        return Err(format!("dict_side_table length {} exceeds trace size",
+            proof.dict_side_table.len()));
+    }
+    if proof.query_indices.len() > max_queries {
+        return Err(format!("query_indices length {} exceeds cap",
+            proof.query_indices.len()));
+    }
+    if proof.fri_commitments.len() > (log_eval_size as usize) + 2 {
+        return Err(format!("fri_commitments length {} exceeds log_eval_size + 2",
+            proof.fri_commitments.len()));
+    }
+    if proof.fri_last_layer.len() > max_eval_len {
+        return Err(format!("fri_last_layer length {} exceeds eval size",
+            proof.fri_last_layer.len()));
+    }
+
+    // Independently recompute program_hash from the bytecode carried in
+    // public_inputs and reject any mismatch. This closes the prior
+    // "caller's responsibility" gap — the verifier now binds the proof
+    // to the exact bytecode it claims to have run. Runs AFTER the DoS
+    // gates so a massive bytecode doesn't force a pointless Blake2s.
+    {
+        let recomputed = compute_program_hash(&proof.public_inputs.program);
+        if recomputed != proof.public_inputs.program_hash {
+            return Err(format!(
+                "program_hash mismatch: public_inputs.program_hash = {:?} \
+                 but Blake2s(public_inputs.program) = {:?}",
+                proof.public_inputs.program_hash, recomputed
+            ));
+        }
     }
 
     // ---- Replay Fiat-Shamir (must match prover exactly) ----
@@ -4647,6 +4706,49 @@ mod tests {
         // Verify FRI fold equations pass
         let result = cairo_verify(&proof);
         assert!(result.is_ok(), "Cairo proof failed: {:?}", result);
+    }
+
+    #[test]
+    fn test_verifier_rejects_oversized_log_n() {
+        ffi::init_memory_pool();
+        let program = build_fib_program(64);
+        let mut proof = cairo_prove(&program, 64, 6);
+        proof.log_trace_size = 33;
+        let err = cairo_verify(&proof).expect_err("log_n > 32 must be rejected");
+        assert!(err.contains("exceeds sanity cap"), "error: {err}");
+    }
+
+    #[test]
+    fn test_verifier_rejects_oversized_memory_table() {
+        ffi::init_memory_pool();
+        let program = build_fib_program(64);
+        let mut proof = cairo_prove(&program, 64, 6);
+        // Trace size = 64; bound is 4× = 256. Push 1024 entries to blow it.
+        proof.memory_table_data = vec![[0, 0, 0]; 1024];
+        let err = cairo_verify(&proof).expect_err("oversized memory_table must be rejected");
+        assert!(err.contains("memory_table_data length"), "error: {err}");
+    }
+
+    #[test]
+    fn test_verifier_rejects_oversized_bitwise_rows() {
+        ffi::init_memory_pool();
+        let program = build_fib_program(64);
+        let mut proof = cairo_prove(&program, 64, 6);
+        // Trace size = 64; any length > 64 is over the cap.
+        proof.bitwise_rows = vec![[0, 0, 0, 0, 0]; 128];
+        let err = cairo_verify(&proof).expect_err("oversized bitwise_rows must be rejected");
+        assert!(err.contains("bitwise_rows length"), "error: {err}");
+    }
+
+    #[test]
+    fn test_verifier_rejects_oversized_program() {
+        ffi::init_memory_pool();
+        let program = build_fib_program(64);
+        let mut proof = cairo_prove(&program, 64, 6);
+        // Trace size = 64; bound is 8× = 512. Blow it.
+        proof.public_inputs.program = vec![0; 1024];
+        let err = cairo_verify(&proof).expect_err("oversized program must be rejected");
+        assert!(err.contains("program length"), "error: {err}");
     }
 
     #[test]
