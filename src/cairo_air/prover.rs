@@ -3064,6 +3064,21 @@ pub fn cairo_verify(proof: &CairoProof) -> Result<(), String> {
     if proof.dict_main_interaction_commitment == [0; 8] {
         return Err("Dict main interaction commitment is zero".into());
     }
+    if proof.logup_t1_commitment == [0; 8] {
+        return Err("LogUp T1 commitment is zero".into());
+    }
+    if proof.logup_t2_commitment == [0; 8] {
+        return Err("LogUp T2 commitment is zero".into());
+    }
+    if proof.logup_t3_commitment == [0; 8] {
+        return Err("LogUp T3 commitment is zero".into());
+    }
+    if proof.rc_u1_commitment == [0; 8] {
+        return Err("RC U1 commitment is zero".into());
+    }
+    if proof.rc_u2_commitment == [0; 8] {
+        return Err("RC U2 commitment is zero".into());
+    }
     if let Some(c) = proof.bitwise_commitment {
         if c == [0; 8] {
             return Err("Bitwise commitment is zero".into());
