@@ -668,6 +668,12 @@ unsafe extern "C" {
         n_leaves: u32,
     );
 
+    /// Shinobi-hash support: reduce every u32 in `data[0..n_words]`
+    /// to the M31 range `[0, P-1]` in place. Matches `M31::reduce` on
+    /// the CPU side. Post-processes hash outputs to produce the
+    /// `HashValue<QM31>`-safe form the Shinobi verifier expects.
+    pub fn cuda_reduce_words_to_m31(data: *mut u32, n_words: u32);
+
     pub fn cuda_merkle_hash_nodes(
         children: *const u32,
         parents: *mut u32,

@@ -26,6 +26,13 @@ bench-max-size = []
 # proving-utils@0305dbe. zstd-level-3 framing is a separate step
 # (vendoring required); see `circuit_serialize::frame_with_zstd`.
 shinobi-compat = []
+# Enables the `cuda_reduce_words_to_m31` GPU kernel and
+# `blake2s_m31::reduce_device_buffer` helper — infrastructure for the
+# full Blake2sM31 Merkle rewrite (tracked separately). DOES NOT
+# currently alter any prover/verifier path; it's a pure build-layer
+# opt-in that keeps the reduction kernel available for the follow-up
+# commits that will wire it into the production commit paths.
+shinobi-hash = []
 
 [[bin]]
 name = "vortex-bench"

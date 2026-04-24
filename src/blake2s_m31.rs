@@ -100,6 +100,25 @@ pub fn reduce_words_to_m31(digest_words: [u32; 8]) -> [u32; 8] {
     out
 }
 
+/// Reduce every u32 in a `DeviceBuffer<u32>` to the M31 range via the
+/// `cuda_reduce_words_to_m31` GPU kernel. In place.
+///
+/// Used by the `shinobi-hash` feature to post-process each Merkle
+/// layer's hash output so downstream parent-hash calls see child bytes
+/// that already sit in `[0, P-1]`. Matches the CPU reduction byte-for-
+/// byte (the CUDA kernel in `cuda/reduce_m31.cu` uses the identical
+/// `lo = v & P; hi = v >> 31; r = lo + hi; canon(r)` formula).
+#[cfg(feature = "shinobi-hash")]
+pub fn reduce_device_buffer(buf: &mut crate::device::DeviceBuffer<u32>, n_words: usize) {
+    use crate::cuda::ffi;
+    if n_words == 0 {
+        return;
+    }
+    unsafe {
+        ffi::cuda_reduce_words_to_m31(buf.as_mut_ptr(), n_words as u32);
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -219,5 +238,38 @@ mod tests {
         // Upstream asserts input.len() == n_bytes.div_ceil(16).
         let input: Vec<QM31> = vec![QM31::from_u32_array([1, 2, 3, 4])];
         let _ = blake2s_m31_qm31(&input, 48); // needs 3 QM31s, has 1 → panic
+    }
+
+    /// GPU kernel (cuda/reduce_m31.cu) must produce the same output as
+    /// `reduce_words_to_m31` on the CPU. This is the contract that
+    /// future Merkle-tree wiring (task #43) will rely on — if the
+    /// GPU reduction ever diverges from the CPU one, roots won't match.
+    #[test]
+    #[cfg(feature = "shinobi-hash")]
+    fn gpu_reduce_matches_cpu() {
+        use crate::device::DeviceBuffer;
+
+        // Mix of canonical (< P), boundary (P, 2P), and non-canonical
+        // (bit 31 set) inputs.
+        let input: Vec<u32> = vec![
+            0, 1, 42, M31_P - 1, M31_P, M31_P + 1, 2 * M31_P, 2 * M31_P + 1,
+            0x8000_0000, 0x8000_0001, 0xFFFF_FFFE, 0xFFFF_FFFF,
+            // Pad to a non-multiple of the 256-thread block to exercise
+            // the tail branch.
+            0xDEAD_BEEF, 0xCAFE_BABE, 0x0BAD_F00D, 0x5A5A_5A5A,
+            0x1234_5678, 0x8765_4321, 0xF00D_CAFE, 0xABCDu32,
+        ];
+        let expected: Vec<u32> = input.iter().map(|&w| M31::reduce(w as u64).0).collect();
+
+        let mut d = DeviceBuffer::from_host(&input);
+        reduce_device_buffer(&mut d, input.len());
+        let got = d.to_host();
+
+        assert_eq!(got, expected, "GPU reduce_words_to_m31 diverges from CPU");
+
+        // Every output word must be canonical.
+        for &w in &got {
+            assert!(w < M31_P, "GPU output {w:#x} must be < P");
+        }
     }
 }
