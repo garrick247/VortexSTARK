@@ -106,6 +106,7 @@ uint32_t qm31_sub_im_re(uint32_t a __attribute__((unused)), uint32_t b __attribu
 uint32_t qm31_sub_im_im(uint32_t a __attribute__((unused)), uint32_t b __attribute__((unused)));
 __device__ uint32_t reduce_word(uint32_t v __attribute__((unused)));
 __global__ void reduce_words_to_m31(forge_span_u32_t data __attribute__((unused)), uint64_t n_words __attribute__((unused)));
+
 __device__ uint64_t warp_reduce_sum(uint64_t val __attribute__((unused))) {
   uint64_t v __attribute__((unused)) = val;
   v = (v + __shfl_xor_sync(0xffffffff, v, 16ULL, 32ULL));
