@@ -170,13 +170,36 @@ __global__ void cairo_quotient_kernel(
     const uint32_t* __restrict__ trans_factor,  // [n] (y_eval_i - y_trace_last), zero at last trace row
     // QM31 challenges: [z_mem(4), alpha_mem(4), alpha_mem_sq(4), z_rc(4), z_dict_link(4), alpha_dict_link(4)]
     const uint32_t* __restrict__ challenges,
-    uint32_t n,            // eval domain size
-    uint32_t blowup_step  // = 1 << BLOWUP_BITS (eval positions per trace step)
+    uint32_t n,            // eval domain size (full mode) OR rows-to-compute (slab mode)
+    uint32_t blowup_step,  // = 1 << BLOWUP_BITS (eval positions per trace step)
+    // ── Phase 3 row-chunking (slab mode) ──────────────────────────────────────
+    // When `slab_mode == 0` (default / full mode): the col pointers above span
+    // the full eval domain of size `n`, `vh_inv`/`trans_factor`/`out` are
+    // indexed by `i`, and `next_i` wraps modulo `n`. `chunk_offset` is ignored.
+    //
+    // When `slab_mode == 1` (chunked mode): the col pointers span
+    // `n + blowup_step` rows of a per-chunk slab starting at row
+    // `chunk_offset` of the global eval domain, with the trailing
+    // `blowup_step` overlap rows covering next-row references at the chunk
+    // boundary. The kernel computes rows `[chunk_offset, chunk_offset + n)`
+    // of the global quotient. `vh_inv`/`trans_factor`/`out` remain
+    // full-eval-size and are indexed by the global row `chunk_offset + i`.
+    // `next_i = i + blowup_step` (no modulo — slab includes overlap).
+    //
+    // Caller responsibility: chunk[K-1] (the final chunk) must include the
+    // first `blowup_step` rows of each col group at the end of its slab so
+    // the wrap-around modulo `eval_size` resolves to in-slab reads.
+    uint32_t chunk_offset,
+    uint32_t slab_mode
 ) {
     uint32_t i = blockIdx.x * blockDim.x + threadIdx.x;
     if (i >= n) return;
 
-    uint32_t next_i = (i + blowup_step) % n;  // advance by blowup_step eval positions = 1 trace step
+    // Global row index for full-eval-size buffers (vh_inv, trans_factor, out).
+    uint32_t g_idx = (slab_mode != 0) ? (chunk_offset + i) : i;
+    // Next-row index for column reads. In full mode wraps modulo n; in slab
+    // mode the slab spans n + blowup_step so direct addition stays in bounds.
+    uint32_t next_i = (slab_mode != 0) ? (i + blowup_step) : ((i + blowup_step) % n);
 
     // Unpack QM31 challenges
     QM31 z_mem          = {{challenges[0],  challenges[1],  challenges[2],  challenges[3]}};
@@ -272,7 +295,7 @@ __global__ void cairo_quotient_kernel(
             f_pc_jnz,
             m31_mul(dst, m31_sub(next_pc, m31_add(pc, op1)))
         );
-        uint32_t c = m31_mul(m31_add(non_jnz, jnz_part), trans_factor[i]);
+        uint32_t c = m31_mul(m31_add(non_jnz, jnz_part), trans_factor[g_idx]);
         QM31 alpha = {{alpha_coeffs[ci*4], alpha_coeffs[ci*4+1],
                        alpha_coeffs[ci*4+2], alpha_coeffs[ci*4+3]}};
         quotient = qm31_add(quotient, qm31_mul_m31(alpha, c));
@@ -289,7 +312,7 @@ __global__ void cairo_quotient_kernel(
             ),
             m31_mul(f_call, 2)
         );
-        uint32_t c = m31_mul(m31_sub(next_ap, expected_ap), trans_factor[i]);
+        uint32_t c = m31_mul(m31_sub(next_ap, expected_ap), trans_factor[g_idx]);
         QM31 alpha = {{alpha_coeffs[ci*4], alpha_coeffs[ci*4+1],
                        alpha_coeffs[ci*4+2], alpha_coeffs[ci*4+3]}};
         quotient = qm31_add(quotient, qm31_mul_m31(alpha, c));
@@ -308,7 +331,7 @@ __global__ void cairo_quotient_kernel(
             ),
             m31_mul(f_ret, dst)
         );
-        uint32_t c = m31_mul(m31_sub(next_fp, expected_fp), trans_factor[i]);
+        uint32_t c = m31_mul(m31_sub(next_fp, expected_fp), trans_factor[g_idx]);
         QM31 alpha = {{alpha_coeffs[ci*4], alpha_coeffs[ci*4+1],
                        alpha_coeffs[ci*4+2], alpha_coeffs[ci*4+3]}};
         quotient = qm31_add(quotient, qm31_mul_m31(alpha, c));
@@ -374,7 +397,7 @@ __global__ void cairo_quotient_kernel(
     {
         uint32_t inst_size_c = m31_add(1, f_op1_imm);
         uint32_t dst_x_inv = m31_mul(dst, dst_inv);
-        uint32_t c = m31_mul(m31_mul(f_pc_jnz, m31_mul(m31_sub(1, dst_x_inv), m31_sub(next_pc, m31_add(pc, inst_size_c)))), trans_factor[i]);
+        uint32_t c = m31_mul(m31_mul(f_pc_jnz, m31_mul(m31_sub(1, dst_x_inv), m31_sub(next_pc, m31_add(pc, inst_size_c)))), trans_factor[g_idx]);
         QM31 alpha = {{alpha_coeffs[ci*4], alpha_coeffs[ci*4+1], alpha_coeffs[ci*4+2], alpha_coeffs[ci*4+3]}};
         quotient = qm31_add(quotient, qm31_mul_m31(alpha, c)); ci++;
     }
@@ -479,7 +502,7 @@ __global__ void cairo_quotient_kernel(
         QM31 a31c = {{alpha_coeffs[ci*4], alpha_coeffs[ci*4+1], alpha_coeffs[ci*4+2], alpha_coeffs[ci*4+3]}};
         quotient = qm31_add(quotient, qm31_mul(a31c, c31c)); ci++;
         // C31d: (S_next - T3) * d3 - 1 = 0  [step-transition: multiply by trans_factor]
-        QM31 c31d = qm31_mul_m31(qm31_sub(qm31_mul(qm31_sub(s_next, t3), d3), one), trans_factor[i]);
+        QM31 c31d = qm31_mul_m31(qm31_sub(qm31_mul(qm31_sub(s_next, t3), d3), one), trans_factor[g_idx]);
         QM31 a31d = {{alpha_coeffs[ci*4], alpha_coeffs[ci*4+1], alpha_coeffs[ci*4+2], alpha_coeffs[ci*4+3]}};
         quotient = qm31_add(quotient, qm31_mul(a31d, c31d)); ci++;
     }
@@ -500,7 +523,7 @@ __global__ void cairo_quotient_kernel(
         QM31 c32b = qm31_sub(qm31_mul(qm31_sub(u2, u1), r1), one);
         QM31 a32b = {{alpha_coeffs[ci*4], alpha_coeffs[ci*4+1], alpha_coeffs[ci*4+2], alpha_coeffs[ci*4+3]}};
         quotient = qm31_add(quotient, qm31_mul(a32b, c32b)); ci++;
-        QM31 c32c = qm31_mul_m31(qm31_sub(qm31_mul(qm31_sub(s_next_rc, u2), r2), one), trans_factor[i]);
+        QM31 c32c = qm31_mul_m31(qm31_sub(qm31_mul(qm31_sub(s_next_rc, u2), r2), one), trans_factor[g_idx]);
         QM31 a32c = {{alpha_coeffs[ci*4], alpha_coeffs[ci*4+1], alpha_coeffs[ci*4+2], alpha_coeffs[ci*4+3]}};
         quotient = qm31_add(quotient, qm31_mul(a32c, c32c)); ci++;
     }
@@ -526,19 +549,21 @@ __global__ void cairo_quotient_kernel(
                      qm31_mul(alpha_dict_link, qm31_from_m31(dict_new_v)));
         QM31 denom = qm31_sub(z_dict_link, entry);
         QM31 diff = qm31_sub(s_next_d, s_curr_d);
-        QM31 c34 = qm31_mul_m31(qm31_sub(qm31_mul(diff, denom), qm31_from_m31(dict_active_v)), trans_factor[i]);
+        QM31 c34 = qm31_mul_m31(qm31_sub(qm31_mul(diff, denom), qm31_from_m31(dict_active_v)), trans_factor[g_idx]);
         QM31 alpha34 = {{alpha_coeffs[ci*4], alpha_coeffs[ci*4+1], alpha_coeffs[ci*4+2], alpha_coeffs[ci*4+3]}};
         quotient = qm31_add(quotient, qm31_mul(alpha34, c34));
         ci++;
     }
 
     skip_qm31_debug: // DEBUG label
-    // Output full constraint sum without V_H (vh_inv=1 from Rust side)
-    quotient = qm31_mul_m31(quotient, vh_inv[i]);
-    out0[i] = quotient.v[0];
-    out1[i] = quotient.v[1];
-    out2[i] = quotient.v[2];
-    out3[i] = quotient.v[3];
+    // Output full constraint sum without V_H (vh_inv=1 from Rust side).
+    // Use g_idx so slab-mode callers write to the right spot in the
+    // full-eval-size quotient output.
+    quotient = qm31_mul_m31(quotient, vh_inv[g_idx]);
+    out0[g_idx] = quotient.v[0];
+    out1[g_idx] = quotient.v[1];
+    out2[g_idx] = quotient.v[2];
+    out3[g_idx] = quotient.v[3];
 }
 
 // Chunked variant for streaming
@@ -851,6 +876,8 @@ void cuda_cairo_quotient(
 ) {
     uint32_t threads = 256;
     uint32_t blocks = (n + threads - 1) / threads;
+    // Full-mode call: chunk_offset=0, slab_mode=0 → kernel uses
+    // `i` directly for vh_inv/trans_factor/out and wraps next_i % n.
     cairo_quotient_kernel<<<blocks, threads>>>(
         trace_cols,
         s_logup0, s_logup1, s_logup2, s_logup3,
@@ -859,7 +886,57 @@ void cuda_cairo_quotient(
         u1r0, u1r1, u1r2, u1r3, u2r0, u2r1, u2r2, u2r3,
         s_dict0, s_dict1, s_dict2, s_dict3,
         out0, out1, out2, out3,
-        alpha_coeffs, vh_inv, trans_factor, challenges, n, blowup_step
+        alpha_coeffs, vh_inv, trans_factor, challenges, n, blowup_step,
+        /*chunk_offset=*/0u, /*slab_mode=*/0u
+    );
+}
+
+// Slab-mode chunked variant of cuda_cairo_quotient. Caller invokes once per
+// chunk with column pointers into a per-chunk slab spanning `chunk_n +
+// blowup_step` rows of each col group, and `chunk_offset` set to the global
+// row index of the chunk start. Outputs (`out0..3`) and `vh_inv`/
+// `trans_factor` remain full-eval-size and are written/read at
+// `chunk_offset + local_i`. The kernel computes rows
+// `[chunk_offset, chunk_offset + chunk_n)` of the global quotient.
+//
+// For the final chunk, the caller must construct the slab so the trailing
+// `blowup_step` rows of each col group are the FIRST `blowup_step` rows of
+// the global eval domain (wrap-around), since `next_i` would otherwise
+// wrap modulo `eval_size`.
+void cuda_cairo_quotient_slab(
+    const uint32_t* const* trace_cols,
+    const uint32_t* s_logup0, const uint32_t* s_logup1,
+    const uint32_t* s_logup2, const uint32_t* s_logup3,
+    const uint32_t* t1l0, const uint32_t* t1l1, const uint32_t* t1l2, const uint32_t* t1l3,
+    const uint32_t* t2l0, const uint32_t* t2l1, const uint32_t* t2l2, const uint32_t* t2l3,
+    const uint32_t* t3l0, const uint32_t* t3l1, const uint32_t* t3l2, const uint32_t* t3l3,
+    const uint32_t* s_rc0, const uint32_t* s_rc1,
+    const uint32_t* s_rc2, const uint32_t* s_rc3,
+    const uint32_t* u1r0, const uint32_t* u1r1, const uint32_t* u1r2, const uint32_t* u1r3,
+    const uint32_t* u2r0, const uint32_t* u2r1, const uint32_t* u2r2, const uint32_t* u2r3,
+    const uint32_t* s_dict0, const uint32_t* s_dict1,
+    const uint32_t* s_dict2, const uint32_t* s_dict3,
+    uint32_t* out0, uint32_t* out1, uint32_t* out2, uint32_t* out3,
+    const uint32_t* alpha_coeffs,
+    const uint32_t* vh_inv,
+    const uint32_t* trans_factor,
+    const uint32_t* challenges,
+    uint32_t chunk_n, uint32_t blowup_step,
+    uint32_t chunk_offset
+) {
+    uint32_t threads = 256;
+    uint32_t blocks = (chunk_n + threads - 1) / threads;
+    cairo_quotient_kernel<<<blocks, threads>>>(
+        trace_cols,
+        s_logup0, s_logup1, s_logup2, s_logup3,
+        t1l0, t1l1, t1l2, t1l3, t2l0, t2l1, t2l2, t2l3, t3l0, t3l1, t3l2, t3l3,
+        s_rc0, s_rc1, s_rc2, s_rc3,
+        u1r0, u1r1, u1r2, u1r3, u2r0, u2r1, u2r2, u2r3,
+        s_dict0, s_dict1, s_dict2, s_dict3,
+        out0, out1, out2, out3,
+        alpha_coeffs, vh_inv, trans_factor, challenges,
+        chunk_n, blowup_step,
+        chunk_offset, /*slab_mode=*/1u
     );
 }
 
