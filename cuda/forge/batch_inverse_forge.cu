@@ -123,35 +123,18 @@ __global__ void batch_inverse_m31(forge_span_u32_t input __attribute__((unused))
     }
     uint64_t count __attribute__((unused)) = (end - start);
     uint32_t prefix[64] __attribute__((unused)) = { 0 };
-    if ((start < input.len)) {
-      prefix[0ULL] = __ldg((const uint32_t*)&input.data[start]);
-
-    }
+    prefix[0ULL] = __ldg((const uint32_t*)&input.data[start]);
     uint64_t i __attribute__((unused)) = 1ULL;
     {
       while ((i < count)) {
-        if (((start + i) < input.len)) {
-          uint32_t val __attribute__((unused)) = __ldg((const uint32_t*)&input.data[(start + i)]);
-          uint32_t prev __attribute__((unused)) = prefix[(i - 1ULL)];
-          if ((val == 0ULL)) {
-            prefix[i] = prev;
+        uint32_t val __attribute__((unused)) = __ldg((const uint32_t*)&input.data[(start + i)]);
+        uint32_t prev __attribute__((unused)) = prefix[(i - 1ULL)];
+        uint32_t prod __attribute__((unused)) = m31_mul(prev, val);
+        if ((val == 0ULL)) {
+          prefix[i] = prev;
 
-          } else {
-            if ((val < M31_P)) {
-              if ((prev < M31_P)) {
-                prefix[i] = m31_mul(prev, val);
-
-              } else {
-                prefix[i] = prev;
-
-              }
-
-            } else {
-              prefix[i] = prev;
-
-            }
-
-          }
+        } else {
+          prefix[i] = prod;
 
         }
         i = (i + 1ULL);
@@ -159,62 +142,35 @@ __global__ void batch_inverse_m31(forge_span_u32_t input __attribute__((unused))
 
     }
     uint32_t total __attribute__((unused)) = prefix[(count - 1ULL)];
-    uint32_t inv0;
-    if ((total < M31_P)) {
-      inv0 = m31_inv(total);
-    } else {
-      inv0 = 0ULL;
-    }
-    uint32_t inv;
-    if ((inv0 < M31_P)) {
-      inv = inv0;
-    } else {
-      inv = 0ULL;
-    }
+    uint32_t inv __attribute__((unused)) = m31_inv(total);
     uint64_t k __attribute__((unused)) = count;
     {
       while ((k > 1ULL)) {
         uint64_t i2 __attribute__((unused)) = (k - 1ULL);
-        if (((start + i2) < input.len)) {
-          if (((start + i2) < output.len)) {
-            uint32_t val __attribute__((unused)) = __ldg((const uint32_t*)&input.data[(start + i2)]);
-            if ((val == 0ULL)) {
-              output.data[(start + i2)] = 0ULL;
+        uint32_t val __attribute__((unused)) = __ldg((const uint32_t*)&input.data[(start + i2)]);
+        uint32_t pre __attribute__((unused)) = prefix[(i2 - 1ULL)];
+        if ((pre < M31_P)) {
+          uint32_t out_val __attribute__((unused)) = m31_mul(inv, pre);
+          uint32_t inv_next __attribute__((unused)) = m31_mul(inv, val);
+          if ((val == 0ULL)) {
+            output.data[(start + i2)] = 0ULL;
 
-            } else {
-              uint32_t pre __attribute__((unused)) = prefix[(i2 - 1ULL)];
-              if ((pre < M31_P)) {
-                output.data[(start + i2)] = m31_mul(inv, pre);
-                if ((val < M31_P)) {
-                  uint32_t inv_next __attribute__((unused)) = m31_mul(inv, val);
-                  inv = inv_next;
-
-                }
-
-              } else {
-                output.data[(start + i2)] = 0ULL;
-
-              }
-
-            }
+          } else {
+            output.data[(start + i2)] = out_val;
+            inv = inv_next;
 
           }
+
+        } else {
+          output.data[(start + i2)] = 0ULL;
 
         }
         k = (k - 1ULL);
       }
 
     }
-    if ((start < output.len)) {
-      uint32_t v0;
-      if ((start < input.len)) {
-        v0 = __ldg((const uint32_t*)&input.data[start]);
-      } else {
-        v0 = 0ULL;
-      }
-      output.data[start] = ((v0 == 0ULL) ? 0ULL : inv);
-
-    }
+    uint32_t v0 __attribute__((unused)) = __ldg((const uint32_t*)&input.data[start]);
+    output.data[start] = ((v0 == 0ULL) ? 0ULL : inv);
 
   }
 }
