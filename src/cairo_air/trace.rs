@@ -295,9 +295,28 @@ pub fn eval_transition_constraints(
     constraints
 }
 
-/// Number of transition constraints.
-/// 31 main M31 constraints + 2 QM31 interaction step-transition constraints (LogUp + RC).
-pub const N_CONSTRAINTS: usize = 15 + 1 + 1 + 1 + 1 + 1 + 10 + 1 + 4 + 3 + 1 + 1; // 40 (LogUp:4, RC:3, binary:1, Dict:1)
+/// Number of alpha-bound sub-constraints used to combine the AIR quotient.
+///
+/// AUDIT.md and SOUNDNESS.md count **35 logical constraints** (C0..C34) —
+/// that's the auditor-facing taxonomy. The kernel
+/// (`cuda/cairo_constraint.cu::cairo_quotient_kernel`) implements them as
+/// **40 alpha-bound sub-constraints**:
+///
+///   - C0..C30 (31): each one alpha
+///   - C31 (LogUp memory): expands to 4 sub-constraints C31a..C31d (one per
+///     intermediate term T1, T2, T3, S_next), each with its own alpha
+///   - C32 (RC step transition): expands to 3 sub-constraints C32a..C32c
+///     (one per RC offset off0/off1/off2), each with its own alpha
+///   - C33 (dict_active binary): 1 alpha
+///   - C34 (S_dict step transition): 1 alpha
+///   Total: 31 + 4 + 3 + 1 + 1 = 40.
+///
+/// `N_CONSTRAINTS` is the alpha-buffer size — this value drives both the
+/// channel draw count (`(0..N_CONSTRAINTS).map(|_| channel.draw_felt())`)
+/// and the GPU `alpha_coeffs` buffer size (`N_CONSTRAINTS * 4` u32s).
+/// It is NOT the logical constraint count auditors should reason about —
+/// for that, see AUDIT.md §1 (35 entries).
+pub const N_CONSTRAINTS: usize = 31 + 4 + 3 + 1 + 1;
 
 #[cfg(test)]
 mod tests {

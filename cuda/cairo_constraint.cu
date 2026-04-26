@@ -17,7 +17,17 @@
 
 #define CAIRO_N_COLS 34
 #define CAIRO_N_FLAGS 15
-#define CAIRO_N_CONSTRAINTS 35
+// CAIRO_N_CONSTRAINTS — there are TWO counts here, both correct at their level:
+//   * 35 logical constraints: C0..C34 (matches AUDIT.md and SOUNDNESS.md).
+//   * 40 alpha-bound sub-constraints: C31 (LogUp) expands to 4 (C31a/b/c/d
+//     in the kernel below), C32 (RC) expands to 3 (C32a/b/c).
+// The Rust prover/verifier draw 40 channel alphas (`N_CONSTRAINTS` in
+// `src/cairo_air/trace.rs`); this kernel reads `alpha_coeffs[ci*4+...]`
+// for ci in 0..40. The previous `#define CAIRO_N_CONSTRAINTS 35` was
+// stale documentation — it referred to the logical count but was never
+// referenced from kernel code, and confused the alpha buffer size.
+#define CAIRO_N_LOGICAL_CONSTRAINTS 35
+#define CAIRO_N_ALPHA_CONSTRAINTS   40
 #define COL_INST_LO 3
 #define COL_INST_HI 4
 #define COL_PC 0
@@ -165,7 +175,7 @@ __global__ void cairo_quotient_kernel(
     const uint32_t* __restrict__ s_dict2, const uint32_t* __restrict__ s_dict3,
     uint32_t* __restrict__ out0, uint32_t* __restrict__ out1,
     uint32_t* __restrict__ out2, uint32_t* __restrict__ out3,
-    const uint32_t* __restrict__ alpha_coeffs,  // [N_CONSTRAINTS * 4] QM31 coefficients
+    const uint32_t* __restrict__ alpha_coeffs,  // [40 * 4] = 160 u32 (one QM31 per sub-constraint, 31 + 4 LogUp + 3 RC + 1 + 1)
     const uint32_t* __restrict__ vh_inv,        // [n] 1/Z_H at each eval point (NTT order)
     const uint32_t* __restrict__ trans_factor,  // [n] (y_eval_i - y_trace_last), zero at last trace row
     // QM31 challenges: [z_mem(4), alpha_mem(4), alpha_mem_sq(4), z_rc(4), z_dict_link(4), alpha_dict_link(4)]
