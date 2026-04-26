@@ -170,13 +170,15 @@ Go with **Option B (side table with pointers)**.
       and AUDIT.md "Dict memory bus link / R2 (2026-04-23)".
 
 **Phase 3 — Test + audit**
-- [ ] Tamper tests: corrupt side-table row, corrupt pointer, wrong limb.
-      **Partially covered**: existing dict-tamper tests
-      (`test_dict_logup_*` family) cover the dict-AIR side; the
-      side-table ↔ exec-trace link is exercised by the
-      "DoS / panic hardening (2026-04-23)" zero-commitment rejection in
-      AUDIT.md. A targeted "swap one limb in dict_side_table" tamper
-      test is the natural next step.
+- [x] Tamper tests: corrupt side-table row, corrupt pointer, wrong limb.
+      Three dedicated tests in `src/cairo_air/prover.rs`:
+      `test_dict_side_table_tampered_low_limb_rejected` (key-limb bit
+      flip + commitment rehash → S_dict link cascade rejection),
+      `test_dict_side_table_noncanonical_limb_rejected` (limb ≥ 2^28
+      caught by the canonical-encoding check at prover.rs:3310-3320),
+      `test_dict_side_table_tampered_pointer_rejected` (row pointer
+      corruption + commitment rehash → downstream link rejection). All
+      three pass on 2026-04-26.
 - [ ] End-to-end: prove `LegacyMap<felt252, felt252>` style contract
       with non-M31 values; verify. Requires a real Cairo 1 contract
       that exercises the syscall→overlay→side-table path. The unit test

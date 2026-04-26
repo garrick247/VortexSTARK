@@ -6396,6 +6396,42 @@ mod tests {
     }
 
     #[test]
+    fn test_dict_side_table_tampered_pointer_rejected() {
+        // dict_side_table row layout: [ptr, key_limbs[9], prev_limbs[9],
+        // new_limbs[9]]. The pointer (row[0]) is intentionally unconstrained
+        // by the per-limb 28-bit cap (it's a row index, not an M31 limb), but
+        // it IS part of the Blake2s commitment over the flat side-table data,
+        // so any change to it must surface either via a commitment mismatch
+        // (if not rehashed) or via the Fiat-Shamir cascade once rehashed.
+        // This test rehashes so we exercise the cascade path: the verifier
+        // re-mixes the corrected commitment, draws shifted z_dict_link/
+        // alpha_dict_link, and the downstream S_dict link check fails.
+        ffi::init_memory_pool();
+        let dict_accesses: Vec<(usize, u64, u64, u64)> = vec![
+            (0, 1, 0, 42), (1, 2, 0, 99),
+        ];
+        let mut proof = prove_with_dict(&dict_accesses);
+        cairo_verify(&proof).expect("unmodified proof must verify");
+        assert!(!proof.dict_side_table.is_empty(),
+            "test requires non-empty side table");
+
+        // Flip the pointer of row 0 to a different row index so the verifier
+        // recomputing exec_key_new_sum from dict_exec_data sees a misaligned
+        // (key, new) pair under the post-mix challenges.
+        let original_ptr = proof.dict_side_table[0][0];
+        proof.dict_side_table[0][0] = original_ptr.wrapping_add(7);
+        // Rehash so the hash-match gate at prover.rs:3325 passes; we want
+        // to exercise the downstream link check, not the Blake2s gate.
+        let flat: Vec<u32> = proof.dict_side_table.iter()
+            .flat_map(|r| r.iter().copied())
+            .collect();
+        proof.dict_side_table_commitment = crate::channel::hash_words(&flat);
+
+        assert!(cairo_verify(&proof).is_err(),
+            "tampered side-table pointer must be rejected by the downstream link check");
+    }
+
+    #[test]
     fn test_dict_bus_link_catches_unbacked_memory_entry() {
         // Dict memory bus link: when dict_access_pointers is populated,
         // every memory_table entry at one of those addresses (or +1/+2)

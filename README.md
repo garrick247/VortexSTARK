@@ -148,14 +148,14 @@ Requires: Rust 1.85+ (stable), CUDA 13.0+, RTX 5090 (SM 12.0) or RTX 4090 (SM 8.
 
 ```bash
 cargo build --release
-cargo test                          # 394 lib + 35 integration = 429 total (427 pass, 3 #[ignore])
+cargo test                          # 395 lib + 35 integration = 430 total (428 pass, 3 #[ignore])
 cargo run --release --bin full_benchmark
 cargo run --release --bin gpu_bench     # pre-flight checks + per-section GPU telemetry
 ```
 
 ## Tests
 
-394 lib + 35 integration = 429 total (427 pass, 3 marked `#[ignore]` for benchmark/live-RPC opt-in) covering: M31/CM31/QM31 field arithmetic, Circle NTT, Merkle tree (commit, auth paths, tiled, SoA4), FRI (fold, circle fold, deterministic), STARK prover + verifier (multiple sizes, tamper detection), Cairo VM (decoder, executor, Fibonacci, constraints, LogUp, range checks, instruction decomposition), Poseidon, Pedersen (Stark252 field, EC ops, GPU vs CPU), Bitwise (memory segment, trace generation, verifier native recompute against Fiat-Shamir-bound (x, y), prove/verify round-trip, tamper detection, 32-bit input acceptance, forged-row rejection), LogUp/RC soundness (memory table commitment, cancellation check, RC counts commitment), OODS quotient formula correctness, GPU constraint eval (bytecode VM, warp-cooperative), GPU leaf hashing (Blake2s, domain separation), CASM loader, Cairo hints (AllocSegment, AllocFelt252Dict, dict entry lifecycle, squash, U256InvModN with 7 comprehensive test vectors), Fiat-Shamir transcript ordering (12 commitment points), property tests (completeness, soundness, random mutations), cross-validation (reference VM comparison for 9 program types).
+395 lib + 35 integration = 430 total (428 pass, 3 marked `#[ignore]` for benchmark/live-RPC opt-in) covering: M31/CM31/QM31 field arithmetic, Circle NTT, Merkle tree (commit, auth paths, tiled, SoA4), FRI (fold, circle fold, deterministic), STARK prover + verifier (multiple sizes, tamper detection), Cairo VM (decoder, executor, Fibonacci, constraints, LogUp, range checks, instruction decomposition), Poseidon, Pedersen (Stark252 field, EC ops, GPU vs CPU), Bitwise (memory segment, trace generation, verifier native recompute against Fiat-Shamir-bound (x, y), prove/verify round-trip, tamper detection, 32-bit input acceptance, forged-row rejection), LogUp/RC soundness (memory table commitment, cancellation check, RC counts commitment), OODS quotient formula correctness, GPU constraint eval (bytecode VM, warp-cooperative), GPU leaf hashing (Blake2s, domain separation), CASM loader, Cairo hints (AllocSegment, AllocFelt252Dict, dict entry lifecycle, squash, U256InvModN with 7 comprehensive test vectors), Fiat-Shamir transcript ordering (12 commitment points), property tests (completeness, soundness, random mutations), cross-validation (reference VM comparison for 9 program types).
 
 ## Break This System
 

@@ -131,7 +131,7 @@ plugs directly into the existing stwo-cairo pipeline.
 
 Nethermind's `stwo-gpu` effort (189 commits, no published benchmarks or
 releases) is the only other GPU attempt. VortexSTARK ships with:
-- Passing test suite (392 lib + 35 integration; 3 #[ignore] for benchmark/live-RPC opt-in)
+- Passing test suite (393 lib + 35 integration; 3 #[ignore] for benchmark/live-RPC opt-in)
 - Real benchmarks from real measurements
 - Closed audit
 - On-chain-submittable proofs
