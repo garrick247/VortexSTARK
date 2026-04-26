@@ -324,20 +324,6 @@ pub fn auth_paths_to_hash_witness(
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
 
-/// Transpose `values_by_query[query][col]` → `values_by_col[col][query]`.
-fn transpose_query_major<T: Clone>(
-    values_by_query: &[Vec<T>],
-    n_cols: usize,
-    n_queries: usize,
-) -> Vec<Vec<T>> {
-    let mut out: Vec<Vec<T>> = (0..n_cols).map(|_| Vec::with_capacity(n_queries)).collect();
-    for q in 0..n_queries {
-        for c in 0..n_cols {
-            out[c].push(values_by_query[q][c].clone());
-        }
-    }
-    out
-}
 
 /// Build `queried_values` (column-major) for a trace tree.
 ///

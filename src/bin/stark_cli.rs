@@ -445,11 +445,6 @@ fn cmd_prove_file(path: &PathBuf, output: &str, stwo_output: Option<&str>, max_s
     }
 }
 
-fn parse_hex_u64(s: &str) -> u64 {
-    let s = s.trim().trim_start_matches("0x").trim_start_matches("0X");
-    u64::from_str_radix(s, 16).unwrap_or(0)
-}
-
 #[allow(clippy::too_many_arguments)]
 fn cmd_prove_starknet(
     class_hash: &str,
