@@ -233,7 +233,7 @@ fn constraint_at(t_eval: &[Fp], i: usize, step: usize, eval_n: usize) -> Fp {
 ///
 /// For non-trace-domain points, x^N − 1 ≠ 0 and the denominators are nonzero.
 /// omega_4_pow_i = x^N (which cycles as ω_4^{i mod 4} for i in the eval domain).
-fn vanishing_at(x: Fp, n: usize, e1: Fp, e2: Fp, omega_4: Fp) -> Fp {
+fn vanishing_at(x: Fp, n: usize, e1: Fp, e2: Fp, _omega_4: Fp) -> Fp {
     // x^N for x in D_eval:
     // x = ω_{4N}^i → x^N = ω_4^i (since ω_{4N}^N = ω_4)
     // But we have x directly, not i. So compute x^N via exponentiation.

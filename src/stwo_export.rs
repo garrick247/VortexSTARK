@@ -796,7 +796,7 @@ pub fn reconstruct_root_from_witness(
 pub fn verify_all_merkle_witnesses(
     two: &TwoStarkProof,
     query_indices: &[usize],
-    eval_size: usize,
+    _eval_size: usize,
     trace_values_next: &[Vec<u32>],  // [col 0..34][q_idx] next-row trace values
 ) -> Result<(), String> {
     let log_eval = two.tree_meta[0].log_eval_size;
@@ -1238,7 +1238,7 @@ mod tests {
         let two = cairo_proof_to_stwo(&proof);
 
         let log_eval = (6 + BLOWUP_BITS) as u32;
-        let eval_size = 1usize << log_eval;
+        let _eval_size = 1usize << log_eval;
         let n_q = proof.query_indices.len();
 
         // Sort order for simple trees (3-6).
@@ -1434,7 +1434,7 @@ mod tests {
 
         // Verify that mix_felts(vortex_combined) == Blake2s(state || bytes) —
         // the same operation stwo performs — from an arbitrary starting state.
-        let arbitrary_state = [0x42u8; 32];
+        let _arbitrary_state = [0x42u8; 32];
         let mut ch = Channel::new();
         // Manually set the channel state to our arbitrary state.
         // (mix_digest is Blake2s(all_zeros || arbitrary_state), so we use a
@@ -1498,7 +1498,7 @@ mod tests {
         let two = cairo_proof_to_stwo(&proof);
 
         let log_eval = 6u32 + BLOWUP_BITS;
-        let n_q = proof.query_indices.len();
+        let _n_q = proof.query_indices.len();
 
         /// Helper: call MerkleVerifierLifted on 4-component QM31 leaf data.
         ///
@@ -2089,10 +2089,10 @@ mod tests {
             let even_brt = qi & !1;
             let even_cn = even_brt.reverse_bits() >> (usize::BITS - log_eval_size as u32);
             let pt = crate::cairo_air::prover::canonic_domain_point(even_cn, log_eval_size);
-            let twid_y = SM31(pt.y.0).inverse();
-            let sum = f0 + f1;
-            let diff = f0 - f1;
-            let fri_alpha_val = first_layer_evals[0]; // just to get the channel's fri_alpha
+            let _twid_y = SM31(pt.y.0).inverse();
+            let _sum = f0 + f1;
+            let _diff = f0 - f1;
+            let _fri_alpha_val = first_layer_evals[0]; // just to get the channel's fri_alpha
             // Actually we need the fold alphas from the channel. Let me get them from the proof.
             // The fold alphas are drawn from the channel during FRI commit.
             // stwo's FriVerifier stores them internally - we can't access them.
@@ -2121,7 +2121,7 @@ mod tests {
 
             // Check: what does our prover's fri_last_layer have at this position?
             // fri_last_layer has evaluations at committed_stop_log in BRT order
-            let our_eval = sf(proof.fri_last_layer[last_qi].to_u32_array());
+            let _our_eval = sf(proof.fri_last_layer[last_qi].to_u32_array());
 
             eprintln!("\n=== FRI LAST LAYER DIAGNOSTIC ===");
             eprintln!("query qi={qi}, last_qi={last_qi}, last_log={last_log}");

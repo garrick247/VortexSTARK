@@ -218,7 +218,7 @@ where
         // Replay FRI channel state: fri_commit draws alphas and mixes inner roots.
         // We call fri_verify which replays this, but we need query indices AFTER FRI.
         // So we must replay the FRI commit state first.
-        let n_folds = log_eval - LOG_LAST_LAYER;
+        let _n_folds = log_eval - LOG_LAST_LAYER;
         // α_0 (after quotient_root)
         let _alpha0 = channel.draw_fp();
         // inner roots + alphas (n_folds - 1 of them)

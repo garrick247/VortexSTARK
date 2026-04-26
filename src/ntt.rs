@@ -448,8 +448,6 @@ mod tests {
         }
     }
 
-    /// Test: stwo forward NTT of known coefficients, then eval_at_oods at each domain point.
-    #[test]
     /// Verify permute_half_coset_to_canonic + stwo INTT gives correct eval_at_oods
     /// at EVAL domain size (log_n=8, 256 points).
     #[test]
@@ -768,14 +766,14 @@ mod tests {
         probe_y[1] = 1;
         let mut d_py = DeviceBuffer::from_host(&probe_y);
         evaluate(&mut d_py, &old_fwd);
-        let old_y = d_py.to_host();
+        let _old_y = d_py.to_host();
 
         // Probe 2: [0, 0, 1, 0, ...]
         let mut probe_x = vec![0u32; n];
         probe_x[2] = 1;
         let mut d_px = DeviceBuffer::from_host(&probe_x);
         evaluate(&mut d_px, &old_fwd);
-        let old_x = d_px.to_host();
+        let _old_x = d_px.to_host();
 
         let ho = Coset::half_odds(log_n - 1);
         let half_n = n / 2;

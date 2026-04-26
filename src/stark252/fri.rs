@@ -127,7 +127,7 @@ pub fn fold_layer(f: &[Fp], log_m: u32, alpha: Fp) -> Vec<Fp> {
 /// Returns a `FriWitness` containing all layer data needed to build query proofs.
 pub fn fri_commit(
     f0_evals: Vec<Fp>,
-    f0_root: &Digest,
+    _f0_root: &Digest,
     log_m0: u32,
     channel: &mut Channel252,
 ) -> FriWitness {
@@ -147,7 +147,7 @@ pub fn fri_commit(
     let mut current = fold_layer(&f0_evals, log_m0, alpha0);
     let mut log_m = log_m0 - 1;
 
-    for fold_idx in 1..n_folds {
+    for _fold_idx in 1..n_folds {
         let tree = MerkleTree252::commit(&current);
         let root = tree.root();
         channel.mix_digest(&root);

@@ -337,7 +337,6 @@ mod tests {
     }
 
     #[test]
-    #[cfg(not(feature = "no_gpu"))]
     fn test_rpo_gpu_trace_matches_cpu() {
         // Generate trace on GPU at small log_n, verify first block matches CPU.
         let log_n = 4u32; // 16 rows = 1 permutation block (ROWS_PER_PERM=14, pad to 16)

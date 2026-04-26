@@ -223,7 +223,7 @@ mod tests {
     #[test]
     fn try_to_u64_rejects_wide_value() {
         // A real 252-bit value doesn't fit in u64.
-        let wide = Felt252::from_hex("0x1234567890abcdef_fedcba0987654321");
+        let _wide = Felt252::from_hex("0x1234567890abcdef_fedcba0987654321");
         // from_hex handles the underscore strip? No — it just trims whitespace.
         // Use a pure hex string instead:
         let wide = Felt252::from_hex("0x1234567890abcdeffedcba0987654321");

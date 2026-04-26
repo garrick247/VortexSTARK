@@ -398,8 +398,8 @@ pub fn eval_cairo_constraints(cur: &[Fp], next: &[Fp]) -> Vec<Fp> {
     // flags: indices 15..30
     let f = |i: usize| cur[FLAG_OFFSET + i];
 
-    let two16 = Fp::from_u64(1u64 << 16);
-    let two32 = Fp::from_u64(1u64 << 32);
+    let _two16 = Fp::from_u64(1u64 << 16);
+    let _two32 = Fp::from_u64(1u64 << 32);
     let two48 = Fp { v: [1u64 << 48, 0, 0, 0] };
     let bias  = Fp::from_u64(OFF_BIAS as u64);
 

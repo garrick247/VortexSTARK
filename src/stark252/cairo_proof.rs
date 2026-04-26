@@ -35,7 +35,9 @@
 //! to all prior commitments, preventing cross-proof malleability.
 
 use serde::{Serialize, Deserialize};
-use super::field::{Fp, fp_from_u32x8, Channel252};
+use super::field::{fp_from_u32x8, Channel252};
+#[cfg(test)]
+use super::field::Fp;
 use super::multi_stark::{MultiProof, prove_multi, verify_multi};
 use super::logup::{MemoryLogupProof, prove_memory_logup, verify_memory_logup};
 use super::range_check::{RangeCheckProof, prove_range_check, verify_range_check};

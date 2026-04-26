@@ -2578,7 +2578,7 @@ mod tests {
         // Validate twin-coset evaluation by checking that eval_0 (on half_coset(log_n))
         // correctly reproduces the original trace values via NTT roundtrip.
         let log_n = 8u32;
-        let n = 1usize << log_n;
+        let _n = 1usize << log_n;
 
         let trace = crate::air::fibonacci_trace_raw(M31(1), M31(1), log_n);
         let mut d_data = DeviceBuffer::from_host(&trace);

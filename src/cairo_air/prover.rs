@@ -104,6 +104,11 @@ impl std::fmt::Display for ProveError {
 ///
 /// BRT-canonic: position j has the value at canonic_domain_point(BRT(j)).
 /// This is what stwo stores in `SecureEvaluation<B, BitReversedOrder>`.
+///
+/// Currently used only in `#[cfg(test)]` diagnostic blocks inside
+/// `cairo_prove_cached_with_columns`; gated to silence the dead-code warning
+/// in lib-only builds.
+#[cfg(test)]
 fn permute_half_coset_to_canonic(data: &[u32], log_n: u32) -> Vec<u32> {
     let n = 1usize << log_n;
     assert_eq!(data.len(), n);
@@ -1455,7 +1460,7 @@ fn cairo_prove_cached_with_columns(
     // ---- Phase 2: Fused LogUp interaction ----
     let z_mem = channel.draw_felt();
     let alpha_mem = channel.draw_felt();
-    let alpha_mem_sq = alpha_mem * alpha_mem;
+    let _alpha_mem_sq = alpha_mem * alpha_mem;
     let z_rc = channel.draw_felt();
     // Compute LogUp interaction trace on GPU: upload trace columns, run fused
     // denominator kernel (with alpha^2*inst_hi extension), prefix-scan to running sum.
@@ -3105,7 +3110,7 @@ pub fn cairo_verify(proof: &CairoProof) -> Result<(), String> {
         return Err(format!("log_trace_size {log_n} below minimum 3 (FRI needs room to fold)"));
     }
     let log_eval_size = log_n + BLOWUP_BITS;
-    let eval_size = 1usize << log_eval_size;
+    let _eval_size = 1usize << log_eval_size;
 
     // ---- Verify public inputs ----
     if proof.public_inputs.n_steps == 0 {
@@ -4329,7 +4334,7 @@ pub fn cairo_verify(proof: &CairoProof) -> Result<(), String> {
             let op1_addr  = M31(row[24]);
             let op1_v     = M31(row[25]);
             let accesses = [(pc_v, inst_lo_v), (dst_addr, dst_v), (op0_addr, op0_v), (op1_addr, op1_v)];
-            let delta_logup = logup_row_contribution(z_mem_v, alpha_v, alpha_sq, &accesses, inst_hi_v);
+            let _delta_logup = logup_row_contribution(z_mem_v, alpha_v, alpha_sq, &accesses, inst_hi_v);
 
             // Constraints 31a-31d (polynomial form using decommitted T1/T2/T3)
             {

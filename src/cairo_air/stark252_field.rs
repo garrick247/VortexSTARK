@@ -857,7 +857,7 @@ mod tests {
     #[test]
     fn test_fp_mul_mod() {
         // Test that (p-1) * 2 = p - 2 (since 2*(p-1) = 2p - 2 ≡ -2 mod p ≡ p - 2)
-        let pm1 = Fp { v: [0, 0, 0, 0x0800000000000011] }; // p - 1... wait
+        let _pm1 = Fp { v: [0, 0, 0, 0x0800000000000011] }; // p - 1... wait
         // p = [1, 0, 0, 0x0800000000000011]
         // p-1 = [0, 0, 0, 0x0800000000000011] — NO, that's wrong
         // p-1: limb[0] = 1-1 = 0, rest same

@@ -1051,12 +1051,12 @@ mod tests {
             op1_ap: 1, res_add: 1, opcode_assert: 1, ap_add1: 1,
             ..Default::default()
         };
-        let loop_start = pc;
+        let _loop_start = pc;
         for _ in 0..8 {
             mem.set(pc, add_instr.encode()); pc += 1;
         }
 
-        let trace = execute(&mut mem, 10);
+        let _trace = execute(&mut mem, 10);
 
         // Check Fibonacci sequence: 1, 1, 2, 3, 5, 8, 13, 21, 34, 55
         let fib = [1, 1, 2, 3, 5, 8, 13, 21, 34, 55];

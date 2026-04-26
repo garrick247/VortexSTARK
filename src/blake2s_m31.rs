@@ -28,7 +28,9 @@
 //! end result is identical: `P` and `2P` map to `0`).
 
 use crate::circuit_serialize::HashValueQm31;
-use crate::field::m31::{M31, P as M31_P};
+use crate::field::m31::M31;
+#[cfg(test)]
+use crate::field::m31::P as M31_P;
 use crate::field::qm31::QM31;
 
 /// Hash an arbitrary byte slice with Blake2s-M31.
