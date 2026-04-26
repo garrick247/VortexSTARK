@@ -78,25 +78,12 @@ float shfl_down_sync_f32(float val, uint64_t delta, uint64_t width);  /* extern:
 static const uint32_t M31_P = 2147483647ULL;
 
 /* Forward declarations */
-static __device__ __forceinline__ uint64_t warp_reduce_sum(uint64_t val __attribute__((unused)));
-static __device__ __forceinline__ uint64_t warp_reduce_max(uint64_t val __attribute__((unused)));
-static __device__ __forceinline__ uint64_t warp_reduce_min(uint64_t val __attribute__((unused)));
-static __device__ __forceinline__ float warp_reduce_sum_f32(float val __attribute__((unused)));
-static __device__ __forceinline__ float warp_reduce_max_f32(float val __attribute__((unused)));
-static __device__ __forceinline__ float warp_reduce_min_f32(float val __attribute__((unused)));
-static uint64_t grid_stride_start(uint64_t block_idx __attribute__((unused)), uint64_t block_dim __attribute__((unused)), uint64_t thread_idx __attribute__((unused)));
-static uint64_t grid_stride_step(uint64_t block_dim __attribute__((unused)), uint64_t grid_dim __attribute__((unused)));
 static __host__ __device__ __forceinline__ uint32_t m31_add(uint32_t a __attribute__((unused)), uint32_t b __attribute__((unused)));
 static __host__ __device__ __forceinline__ uint32_t m31_sub(uint32_t a __attribute__((unused)), uint32_t b __attribute__((unused)));
 static __host__ __device__ __forceinline__ uint32_t m31_mul(uint32_t a __attribute__((unused)), uint32_t b __attribute__((unused)));
-static uint32_t m31_neg(uint32_t a __attribute__((unused)));
 static __host__ __device__ __forceinline__ uint32_t m31_double(uint32_t a __attribute__((unused)));
 static __host__ __device__ __forceinline__ uint32_t cm31_mul_re(uint32_t a_re __attribute__((unused)), uint32_t a_im __attribute__((unused)), uint32_t b_re __attribute__((unused)), uint32_t b_im __attribute__((unused)));
 static __host__ __device__ __forceinline__ uint32_t cm31_mul_im(uint32_t a_re __attribute__((unused)), uint32_t a_im __attribute__((unused)), uint32_t b_re __attribute__((unused)), uint32_t b_im __attribute__((unused)));
-static uint32_t cm31_add_re(uint32_t a_re __attribute__((unused)), uint32_t b_re __attribute__((unused)));
-static uint32_t cm31_add_im(uint32_t a_im __attribute__((unused)), uint32_t b_im __attribute__((unused)));
-static uint32_t cm31_sub_re(uint32_t a_re __attribute__((unused)), uint32_t b_re __attribute__((unused)));
-static uint32_t cm31_sub_im(uint32_t a_im __attribute__((unused)), uint32_t b_im __attribute__((unused)));
 static __host__ __device__ __forceinline__ uint32_t qm31_mul_out_re_re(uint32_t a_re __attribute__((unused)), uint32_t a_im __attribute__((unused)), uint32_t b_re __attribute__((unused)), uint32_t b_im __attribute__((unused)), uint32_t c_re __attribute__((unused)), uint32_t c_im __attribute__((unused)), uint32_t d_re __attribute__((unused)), uint32_t d_im __attribute__((unused)));
 static __host__ __device__ __forceinline__ uint32_t qm31_mul_out_re_im(uint32_t a_re __attribute__((unused)), uint32_t a_im __attribute__((unused)), uint32_t b_re __attribute__((unused)), uint32_t b_im __attribute__((unused)), uint32_t c_re __attribute__((unused)), uint32_t c_im __attribute__((unused)), uint32_t d_re __attribute__((unused)), uint32_t d_im __attribute__((unused)));
 static __host__ __device__ __forceinline__ uint32_t qm31_mul_out_im_re(uint32_t a_re __attribute__((unused)), uint32_t a_im __attribute__((unused)), uint32_t b_re __attribute__((unused)), uint32_t b_im __attribute__((unused)), uint32_t c_re __attribute__((unused)), uint32_t c_im __attribute__((unused)), uint32_t d_re __attribute__((unused)), uint32_t d_im __attribute__((unused)));
@@ -111,154 +98,6 @@ static __host__ __device__ __forceinline__ uint32_t qm31_sub_im_re(uint32_t a __
 static __host__ __device__ __forceinline__ uint32_t qm31_sub_im_im(uint32_t a __attribute__((unused)), uint32_t b __attribute__((unused)));
 static __device__ __forceinline__ uint32_t reduce_word(uint32_t v __attribute__((unused)));
 __global__ void fold_circle_into_line_soa(forge_span_u32_t dst0 __attribute__((unused)), forge_span_u32_t dst1 __attribute__((unused)), forge_span_u32_t dst2 __attribute__((unused)), forge_span_u32_t dst3 __attribute__((unused)), forge_span_u32_t src0 __attribute__((unused)), forge_span_u32_t src1 __attribute__((unused)), forge_span_u32_t src2 __attribute__((unused)), forge_span_u32_t src3 __attribute__((unused)), forge_span_u32_t twiddles __attribute__((unused)), uint32_t alpha_a __attribute__((unused)), uint32_t alpha_b __attribute__((unused)), uint32_t alpha_c __attribute__((unused)), uint32_t alpha_d __attribute__((unused)), uint32_t alpha_sq_a __attribute__((unused)), uint32_t alpha_sq_b __attribute__((unused)), uint32_t alpha_sq_c __attribute__((unused)), uint32_t alpha_sq_d __attribute__((unused)), uint64_t half_n __attribute__((unused)));
-
-static __device__ __forceinline__ uint64_t warp_reduce_sum(uint64_t val __attribute__((unused))) {
-  uint64_t v __attribute__((unused)) = val;
-  v = (v + __shfl_xor_sync(0xffffffff, v, 16ULL, 32ULL));
-  v = (v + __shfl_xor_sync(0xffffffff, v, 8ULL, 32ULL));
-  v = (v + __shfl_xor_sync(0xffffffff, v, 4ULL, 32ULL));
-  v = (v + __shfl_xor_sync(0xffffffff, v, 2ULL, 32ULL));
-  v = (v + __shfl_xor_sync(0xffffffff, v, 1ULL, 32ULL));
-  return v;
-}
-
-static __device__ __forceinline__ uint64_t warp_reduce_max(uint64_t val __attribute__((unused))) {
-  uint64_t v __attribute__((unused)) = val;
-  uint64_t s __attribute__((unused)) = __shfl_xor_sync(0xffffffff, v, 16ULL, 32ULL);
-  if ((s > v)) {
-    v = s;
-
-  }
-  s = __shfl_xor_sync(0xffffffff, v, 8ULL, 32ULL);
-  if ((s > v)) {
-    v = s;
-
-  }
-  s = __shfl_xor_sync(0xffffffff, v, 4ULL, 32ULL);
-  if ((s > v)) {
-    v = s;
-
-  }
-  s = __shfl_xor_sync(0xffffffff, v, 2ULL, 32ULL);
-  if ((s > v)) {
-    v = s;
-
-  }
-  s = __shfl_xor_sync(0xffffffff, v, 1ULL, 32ULL);
-  if ((s > v)) {
-    v = s;
-
-  }
-  return v;
-}
-
-static __device__ __forceinline__ uint64_t warp_reduce_min(uint64_t val __attribute__((unused))) {
-  uint64_t v __attribute__((unused)) = val;
-  uint64_t s __attribute__((unused)) = __shfl_xor_sync(0xffffffff, v, 16ULL, 32ULL);
-  if ((s < v)) {
-    v = s;
-
-  }
-  s = __shfl_xor_sync(0xffffffff, v, 8ULL, 32ULL);
-  if ((s < v)) {
-    v = s;
-
-  }
-  s = __shfl_xor_sync(0xffffffff, v, 4ULL, 32ULL);
-  if ((s < v)) {
-    v = s;
-
-  }
-  s = __shfl_xor_sync(0xffffffff, v, 2ULL, 32ULL);
-  if ((s < v)) {
-    v = s;
-
-  }
-  s = __shfl_xor_sync(0xffffffff, v, 1ULL, 32ULL);
-  if ((s < v)) {
-    v = s;
-
-  }
-  return v;
-}
-
-static __device__ __forceinline__ float warp_reduce_sum_f32(float val __attribute__((unused))) {
-  float v __attribute__((unused)) = val;
-  v = (v + __shfl_xor_sync(0xffffffff, v, 16ULL, 32ULL));
-  v = (v + __shfl_xor_sync(0xffffffff, v, 8ULL, 32ULL));
-  v = (v + __shfl_xor_sync(0xffffffff, v, 4ULL, 32ULL));
-  v = (v + __shfl_xor_sync(0xffffffff, v, 2ULL, 32ULL));
-  v = (v + __shfl_xor_sync(0xffffffff, v, 1ULL, 32ULL));
-  return v;
-}
-
-static __device__ __forceinline__ float warp_reduce_max_f32(float val __attribute__((unused))) {
-  float v __attribute__((unused)) = val;
-  float s __attribute__((unused)) = __shfl_xor_sync(0xffffffff, v, 16ULL, 32ULL);
-  if ((s > v)) {
-    v = s;
-
-  }
-  s = __shfl_xor_sync(0xffffffff, v, 8ULL, 32ULL);
-  if ((s > v)) {
-    v = s;
-
-  }
-  s = __shfl_xor_sync(0xffffffff, v, 4ULL, 32ULL);
-  if ((s > v)) {
-    v = s;
-
-  }
-  s = __shfl_xor_sync(0xffffffff, v, 2ULL, 32ULL);
-  if ((s > v)) {
-    v = s;
-
-  }
-  s = __shfl_xor_sync(0xffffffff, v, 1ULL, 32ULL);
-  if ((s > v)) {
-    v = s;
-
-  }
-  return v;
-}
-
-static __device__ __forceinline__ float warp_reduce_min_f32(float val __attribute__((unused))) {
-  float v __attribute__((unused)) = val;
-  float s __attribute__((unused)) = __shfl_xor_sync(0xffffffff, v, 16ULL, 32ULL);
-  if ((s < v)) {
-    v = s;
-
-  }
-  s = __shfl_xor_sync(0xffffffff, v, 8ULL, 32ULL);
-  if ((s < v)) {
-    v = s;
-
-  }
-  s = __shfl_xor_sync(0xffffffff, v, 4ULL, 32ULL);
-  if ((s < v)) {
-    v = s;
-
-  }
-  s = __shfl_xor_sync(0xffffffff, v, 2ULL, 32ULL);
-  if ((s < v)) {
-    v = s;
-
-  }
-  s = __shfl_xor_sync(0xffffffff, v, 1ULL, 32ULL);
-  if ((s < v)) {
-    v = s;
-
-  }
-  return v;
-}
-
-static uint64_t grid_stride_start(uint64_t block_idx __attribute__((unused)), uint64_t block_dim __attribute__((unused)), uint64_t thread_idx __attribute__((unused))) {
-  return ((block_idx * block_dim) + thread_idx);
-}
-
-static uint64_t grid_stride_step(uint64_t block_dim __attribute__((unused)), uint64_t grid_dim __attribute__((unused))) {
-  return (block_dim * grid_dim);
-}
 
 static __host__ __device__ __forceinline__ uint32_t m31_add(uint32_t a __attribute__((unused)), uint32_t b __attribute__((unused))) {
   uint64_t s __attribute__((unused)) = (((uint64_t)a) + ((uint64_t)b));
@@ -292,14 +131,6 @@ static __host__ __device__ __forceinline__ uint32_t m31_mul(uint32_t a __attribu
   return ((uint32_t)r);
 }
 
-static uint32_t m31_neg(uint32_t a __attribute__((unused))) {
-  if ((a == 0ULL)) {
-    return 0ULL;
-  } else {
-    return (M31_P - a);
-  }
-}
-
 static __host__ __device__ __forceinline__ uint32_t m31_double(uint32_t a __attribute__((unused))) {
   return m31_add(a, a);
 }
@@ -314,22 +145,6 @@ static __host__ __device__ __forceinline__ uint32_t cm31_mul_im(uint32_t a_re __
   uint32_t ad __attribute__((unused)) = m31_mul(a_re, b_im);
   uint32_t bc __attribute__((unused)) = m31_mul(a_im, b_re);
   return m31_add(ad, bc);
-}
-
-static uint32_t cm31_add_re(uint32_t a_re __attribute__((unused)), uint32_t b_re __attribute__((unused))) {
-  return m31_add(a_re, b_re);
-}
-
-static uint32_t cm31_add_im(uint32_t a_im __attribute__((unused)), uint32_t b_im __attribute__((unused))) {
-  return m31_add(a_im, b_im);
-}
-
-static uint32_t cm31_sub_re(uint32_t a_re __attribute__((unused)), uint32_t b_re __attribute__((unused))) {
-  return m31_sub(a_re, b_re);
-}
-
-static uint32_t cm31_sub_im(uint32_t a_im __attribute__((unused)), uint32_t b_im __attribute__((unused))) {
-  return m31_sub(a_im, b_im);
 }
 
 static __host__ __device__ __forceinline__ uint32_t qm31_mul_out_re_re(uint32_t a_re __attribute__((unused)), uint32_t a_im __attribute__((unused)), uint32_t b_re __attribute__((unused)), uint32_t b_im __attribute__((unused)), uint32_t c_re __attribute__((unused)), uint32_t c_im __attribute__((unused)), uint32_t d_re __attribute__((unused)), uint32_t d_im __attribute__((unused))) {
