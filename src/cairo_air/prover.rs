@@ -5274,6 +5274,61 @@ mod tests {
         assert!(result.is_ok(), "Cairo proof log_n=14 failed: {:?}", result);
     }
 
+    /// End-to-end prover wallclock bench at log_n=18. Run with
+    /// `cargo test --release ... cairo_prove_wallclock_bench --
+    /// --ignored --nocapture`. log_n=18 = 256K trace rows; kernels
+    /// run at sizes where the microbench-measured speedups (NTT 5x,
+    /// FRI fold 7.8x at n=2^19) actually matter. log_n=14 (16K) was
+    /// too small — kernel launch overhead drowned out per-thread
+    /// work and FORGE features came out 3-5% slower.
+    /// 3 iterations + 1 warmup at this size to keep total runtime
+    /// reasonable (~30s per config).
+    #[test]
+    #[ignore]
+    fn cairo_prove_wallclock_bench() {
+        use std::time::Instant;
+        ffi::init_memory_pool();
+        let log_n = 18u32;
+        let n = 1usize << log_n;
+        let program = build_fib_program(n);
+
+        // Warmup
+        let _ = cairo_prove(&program, n, log_n);
+
+        let mut times: Vec<f64> = Vec::with_capacity(3);
+        for i in 0..3 {
+            let t0 = Instant::now();
+            let proof = cairo_prove(&program, n, log_n);
+            let elapsed = t0.elapsed().as_secs_f64();
+            times.push(elapsed);
+            assert!(cairo_verify(&proof).is_ok(),
+                    "iter {i} verify failed");
+        }
+        let mean = times.iter().sum::<f64>() / times.len() as f64;
+        let variance = times.iter().map(|t| (t - mean).powi(2)).sum::<f64>()
+                       / times.len() as f64;
+        let stddev = variance.sqrt();
+
+        let features = if cfg!(all(feature = "forge-blake2s",
+                                    feature = "forge-ntt",
+                                    feature = "forge-fri")) {
+            "[ALL FORGE]"
+        } else if cfg!(any(feature = "forge-blake2s",
+                            feature = "forge-ntt",
+                            feature = "forge-fri")) {
+            "[PARTIAL FORGE]"
+        } else {
+            "[NO FORGE]"
+        };
+        println!();
+        println!("==== cairo_prove wallclock @ log_n={} {} ====", log_n, features);
+        for (i, t) in times.iter().enumerate() {
+            println!("  iter {}: {:.4}s", i, t);
+        }
+        println!("  mean:  {:.4}s ± {:.4}s ({} iters)", mean, stddev, times.len());
+        println!();
+    }
+
     #[test]
     fn test_cairo_prove_verify_tampered_commitment() {
         ffi::init_memory_pool();

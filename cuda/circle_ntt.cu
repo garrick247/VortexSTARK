@@ -4,6 +4,27 @@
 
 #include "include/qm31.cuh"
 
+// FORGE NTT wire-in: when `forge-ntt` cargo feature is on, build.rs
+// defines FORGE_NTT=1. Each `circle_ntt_layer_kernel<<<>>>` call goes
+// through the proof-checked FORGE host shim instead. Microbench shows
+// the FORGE kernel is ~5x faster than the hand-written one at n=2^20
+// thanks to `__forceinline__`-qualified m31 helpers and fewer
+// redundant masks. Batched kernel paths still use the hand-written
+// version (FORGE doesn't yet support **u32 column pointer arrays).
+#ifdef FORGE_NTT
+extern "C" {
+    void cuda_circle_ntt_layer_forge(
+        uint32_t* data, const uint32_t* twiddles,
+        uint32_t layer_idx, uint32_t n, int forward);
+}
+// half_n = n/2; the FORGE shim recomputes half_n internally.
+#define LAUNCH_NTT_LAYER(blocks, threads, data, tw, li, half_n, fw) \
+    cuda_circle_ntt_layer_forge((data), (tw), (li), (half_n) * 2u, (fw))
+#else
+#define LAUNCH_NTT_LAYER(blocks, threads, data, tw, li, half_n, fw) \
+    circle_ntt_layer_kernel<<<(blocks), (threads)>>>((data), (tw), (li), (half_n), (fw))
+#endif
+
 // Forward butterfly: v0' = v0 + v1*t, v1' = v0 - v1*t
 __device__ __forceinline__ void butterfly(uint32_t& v0, uint32_t& v1, uint32_t t) {
     uint32_t tmp = m31_mul(v1, t);
@@ -193,18 +214,16 @@ void cuda_circle_ntt_evaluate(
 
     // Line layers (highest to lowest)
     for (int layer = (int)n_line_layers - 1; layer >= 0; layer--) {
-        circle_ntt_layer_kernel<<<blocks, threads>>>(
+        LAUNCH_NTT_LAYER(blocks, threads,
             d_data,
             d_twiddles + h_layer_offsets[layer],
             (uint32_t)(layer + 1),
-            half_n, 1
-        );
+            half_n, 1);
     }
 
     // Circle layer (layer 0)
-    circle_ntt_layer_kernel<<<blocks, threads>>>(
-        d_data, d_circle_twids, 0, half_n, 1
-    );
+    LAUNCH_NTT_LAYER(blocks, threads,
+        d_data, d_circle_twids, 0, half_n, 1);
 
     cudaDeviceSynchronize();
 }
@@ -223,17 +242,15 @@ void cuda_circle_ntt_interpolate(
     uint32_t blocks = (half_n + threads - 1) / threads;
 
     // Circle layer first
-    circle_ntt_layer_kernel<<<blocks, threads>>>(
-        d_data, d_circle_itwids, 0, half_n, 0
-    );
+    LAUNCH_NTT_LAYER(blocks, threads,
+        d_data, d_circle_itwids, 0, half_n, 0);
 
     // Line layers (lowest to highest)
     for (uint32_t layer = 0; layer < n_line_layers; layer++) {
-        circle_ntt_layer_kernel<<<blocks, threads>>>(
+        LAUNCH_NTT_LAYER(blocks, threads,
             d_data,
             d_itwiddles + h_layer_offsets[layer],
-            layer + 1, half_n, 0
-        );
+            layer + 1, half_n, 0);
     }
 
     // Scale by 1/n: inv_n = 2^(30*log_n mod 31) in M31
@@ -330,9 +347,8 @@ void cuda_circle_ntt_layer(
     uint32_t half_n = n / 2;
     uint32_t threads = 256;
     uint32_t blocks = (half_n + threads - 1) / threads;
-    circle_ntt_layer_kernel<<<blocks, threads>>>(
-        d_data, d_twiddles, layer_idx, half_n, forward
-    );
+    LAUNCH_NTT_LAYER(blocks, threads,
+        d_data, d_twiddles, layer_idx, half_n, forward);
 }
 
 void cuda_bit_reverse_m31(uint32_t* data, uint32_t log_n) {

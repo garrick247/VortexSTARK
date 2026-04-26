@@ -33,6 +33,26 @@ shinobi-compat = ["dep:zstd"]
 # opt-in that keeps the reduction kernel available for the follow-up
 # commits that will wire it into the production commit paths.
 shinobi-hash = []
+# Route Merkle leaf hashing through the FORGE-emitted kernel when n_cols=1.
+# FORGE source: forge/analysis/vortex_ntt/merkle_hash_leaves.fg
+# (133 proof obligations discharged). Output is byte-identical to the
+# hand-written `cuda_merkle_hash_leaves` kernel — verified by
+# `gpu_forge_leaf_hash_matches_handwritten`. Default off until the
+# 4-column SoA FORGE variant lands.
+forge-blake2s = []
+# Route Circle NTT butterfly layers through the FORGE-emitted kernel.
+# Source: forge/analysis/vortex_ntt/circle_ntt_layer.fg (138 obligations).
+# Microbench at n=2^20: hand-written 93µs vs FORGE 18µs (5x speedup).
+# Wires through `cuda_circle_ntt_evaluate`, `_interpolate`, and the
+# public `cuda_circle_ntt_layer` shim. Batched (multi-column) NTT
+# paths still use the hand-written kernel.
+forge-ntt = []
+# Route FRI fold kernels (fold_line_soa, fold_circle_into_line_soa)
+# through the FORGE-emitted variants. Sources:
+# forge/analysis/vortex_ntt/fri_fold_line.fg (193 obligations) and
+# fri_fold_circle.fg (237). Microbench at half_n=2^19: hand-written
+# 108µs vs FORGE 14µs (7.8x). Macro dispatch in cuda/fri.cu.
+forge-fri = []
 
 [[bin]]
 name = "vortex-bench"
@@ -65,6 +85,10 @@ path = "src/bin/hash_bench.rs"
 [[bin]]
 name = "gpu_bench"
 path = "src/bin/gpu_bench.rs"
+
+[[bin]]
+name = "forge_bench"
+path = "src/bin/forge_bench.rs"
 
 [dependencies]
 axum = { version = "0.8", features = ["ws"] }

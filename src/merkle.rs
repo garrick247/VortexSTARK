@@ -36,8 +36,34 @@ impl MerkleTree {
         // Allocate leaf hashes
         let mut d_leaves = DeviceBuffer::<u32>::alloc((n_leaves as usize) * HASH_WORDS);
 
-        // Hash leaves on GPU
+        // Hash leaves on GPU. With `forge-blake2s`, route n_cols ∈ {1, 4}
+        // through the FORGE-emitted kernel (proof-checked emit, byte-
+        // parity verified against the hand-written kernel). All other
+        // shapes still use the hand-written multi-column path.
         unsafe {
+            #[cfg(feature = "forge-blake2s")]
+            match n_cols {
+                1 => ffi::cuda_merkle_hash_leaves_forge_single(
+                    columns[0].as_ptr(),
+                    d_leaves.as_mut_ptr(),
+                    n_leaves,
+                ),
+                4 => ffi::cuda_merkle_hash_leaves_forge_quad(
+                    columns[0].as_ptr(),
+                    columns[1].as_ptr(),
+                    columns[2].as_ptr(),
+                    columns[3].as_ptr(),
+                    d_leaves.as_mut_ptr(),
+                    n_leaves,
+                ),
+                _ => ffi::cuda_merkle_hash_leaves(
+                    d_col_ptrs.as_ptr() as *const *const u32,
+                    d_leaves.as_mut_ptr(),
+                    n_cols,
+                    n_leaves,
+                ),
+            }
+            #[cfg(not(feature = "forge-blake2s"))]
             ffi::cuda_merkle_hash_leaves(
                 d_col_ptrs.as_ptr() as *const *const u32,
                 d_leaves.as_mut_ptr(),

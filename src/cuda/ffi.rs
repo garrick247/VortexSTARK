@@ -341,6 +341,40 @@ unsafe extern "C" {
         alpha_sq: *const u32,  // [4] on host
         half_n: u32,
     );
+
+    /// FORGE-emitted FRI fold_line_soa. Same semantics as
+    /// `cuda_fold_line_soa` but generated from
+    /// forge/analysis/vortex_ntt/fri_fold_line.fg with 193 proof
+    /// obligations discharged. Inputs must be canonical M31
+    /// (< P); the kernel canonicalizes anyway as a contract guard.
+    pub fn cuda_fold_line_soa_forge(
+        in0: *const u32, in1: *const u32, in2: *const u32, in3: *const u32,
+        twiddles: *const u32,
+        out0: *mut u32, out1: *mut u32, out2: *mut u32, out3: *mut u32,
+        alpha: *const u32,
+        half_n: u32,
+    );
+
+    /// FORGE-emitted FRI fold_circle_into_line_soa. Source:
+    /// forge/analysis/vortex_ntt/fri_fold_circle.fg (237 obligations).
+    pub fn cuda_fold_circle_into_line_soa_forge(
+        dst0: *mut u32, dst1: *mut u32, dst2: *mut u32, dst3: *mut u32,
+        src0: *const u32, src1: *const u32, src2: *const u32, src3: *const u32,
+        twiddles: *const u32,
+        alpha: *const u32,
+        alpha_sq: *const u32,
+        half_n: u32,
+    );
+
+    /// FORGE-emitted single-column Circle NTT butterfly layer.
+    /// Equivalent to `cuda_circle_ntt_layer` from cuda/circle_ntt.cu,
+    /// generated from forge/analysis/vortex_ntt/circle_ntt_layer.fg
+    /// (138 proof obligations). `forward != 0` selects the forward
+    /// butterfly; `forward == 0` selects the inverse.
+    pub fn cuda_circle_ntt_layer_forge(
+        data: *mut u32, twiddles: *const u32,
+        layer_idx: u32, n: u32, forward: i32,
+    );
 }
 
 // Twiddle computation kernels
@@ -703,6 +737,34 @@ unsafe extern "C" {
     /// `HashValue<QM31>`-safe form the Shinobi verifier expects.
     pub fn cuda_reduce_words_to_m31(data: *mut u32, n_words: u32);
 
+    /// Single-column FORGE-emitted Blake2s leaf hash. Equivalent to
+    /// `cuda_merkle_hash_leaves(&[column], hashes, 1, n_leaves)` but
+    /// generated from a verified source (analysis/vortex_ntt/
+    /// merkle_hash_leaves.fg, 133 proof obligations discharged).
+    /// Output is M31-reduced unconditionally (matches shinobi-hash
+    /// post-reduce; for non-shinobi builds the reduction is a no-op
+    /// since canonical M31 leaves are already in range).
+    pub fn cuda_merkle_hash_leaves_forge_single(
+        column: *const u32,
+        hashes: *mut u32,
+        n_leaves: u32,
+    );
+
+    /// Four-column FORGE-emitted Blake2s leaf hash. Equivalent to
+    /// `cuda_merkle_hash_leaves(&[c0,c1,c2,c3], hashes, 4, n_leaves)`.
+    /// FORGE source: forge/analysis/vortex_ntt/merkle_hash_leaves.fg
+    /// `merkle_hash_leaves_quad` kernel (proof obligations included in
+    /// the file's 145-obligation total). Same M31-reduce semantics
+    /// as the single-column variant.
+    pub fn cuda_merkle_hash_leaves_forge_quad(
+        c0: *const u32,
+        c1: *const u32,
+        c2: *const u32,
+        c3: *const u32,
+        hashes: *mut u32,
+        n_leaves: u32,
+    );
+
     pub fn cuda_merkle_hash_nodes(
         children: *const u32,
         parents: *mut u32,
@@ -870,6 +932,43 @@ unsafe extern "C" {
     /// Gather 8-word (256-bit) elements: dst[i*8..+8] = src[idx[i]*8..+8]
     /// Used for batched CudaColumn<Blake2sHash> decommitment.
     pub fn cuda_gather_u256(src: *const u32, idx: *const u32, dst: *mut u32, n: u32);
+
+    /// FORGE-emitted variant of `cuda_gather_u32`. Same semantics but
+    /// takes the explicit `src_len` so the kernel can guard against
+    /// out-of-range `idx[i]` values (FORGE proves the load is safe
+    /// only when this guard is present).
+    pub fn cuda_gather_u32_forge(
+        src: *const u32, idx: *const u32, dst: *mut u32,
+        n: u32, src_len: u32,
+    );
+
+    /// FORGE-emitted variant of `cuda_gather_u256`. Same semantics but
+    /// takes the explicit `src_len` (in u32 units) so the kernel can
+    /// bounds-check the 8-word load.
+    pub fn cuda_gather_u256_forge(
+        src: *const u32, idx: *const u32, dst: *mut u32,
+        n: u32, src_len: u32,
+    );
+
+    /// FORGE-emitted QM31 bit-reverse. SecureField columns store QM31
+    /// elements as 4 consecutive u32s. This kernel permutes the 4-u32
+    /// chunks into bit-reversed index order. Equivalent to
+    /// `cuda_bit_reverse_qm31` from cuda/bit_reverse_wide.cu, generated
+    /// from forge/analysis/vortex_ntt/bit_reverse_qm31.fg
+    /// (12 proof obligations including bounded-loop termination on
+    /// the bit-reverse inner loop).
+    pub fn cuda_bit_reverse_qm31_forge(
+        in_buf: *const u32, out_buf: *mut u32, n: u32, log_n: u32,
+    );
+
+    /// FORGE-emitted M31 batch inverse via Montgomery's trick. Same
+    /// chunk size (64 elements per thread) as `cuda_batch_inverse_m31`.
+    /// Generated from forge/analysis/vortex_ntt/batch_inverse.fg
+    /// (160 proof obligations including m31_inv termination + the
+    /// prefix-product loop invariants).
+    pub fn cuda_batch_inverse_m31_forge(
+        input: *const u32, output: *mut u32, n: u32,
+    );
 
     // ── Barycentric evaluation ──────────────────────────────────────────
 

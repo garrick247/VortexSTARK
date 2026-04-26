@@ -88,7 +88,7 @@ static uint64_t grid_stride_start(uint64_t block_idx __attribute__((unused)), ui
 static uint64_t grid_stride_step(uint64_t block_dim __attribute__((unused)), uint64_t grid_dim __attribute__((unused)));
 static uint32_t m31_add(uint32_t a __attribute__((unused)), uint32_t b __attribute__((unused)));
 static uint32_t m31_sub(uint32_t a __attribute__((unused)), uint32_t b __attribute__((unused)));
-static uint32_t m31_mul(uint32_t a __attribute__((unused)), uint32_t b __attribute__((unused)));
+static __host__ __device__ __forceinline__ uint32_t m31_mul(uint32_t a __attribute__((unused)), uint32_t b __attribute__((unused)));
 static uint32_t m31_neg(uint32_t a __attribute__((unused)));
 static uint32_t m31_double(uint32_t a __attribute__((unused)));
 static uint32_t cm31_mul_re(uint32_t a_re __attribute__((unused)), uint32_t a_im __attribute__((unused)), uint32_t b_re __attribute__((unused)), uint32_t b_im __attribute__((unused)));
@@ -109,8 +109,8 @@ static uint32_t qm31_sub_re_re(uint32_t a __attribute__((unused)), uint32_t b __
 static uint32_t qm31_sub_re_im(uint32_t a __attribute__((unused)), uint32_t b __attribute__((unused)));
 static uint32_t qm31_sub_im_re(uint32_t a __attribute__((unused)), uint32_t b __attribute__((unused)));
 static uint32_t qm31_sub_im_im(uint32_t a __attribute__((unused)), uint32_t b __attribute__((unused)));
-static __host__ __device__ __forceinline__ uint32_t reduce_word(uint32_t v __attribute__((unused)));
-__global__ void reduce_words_to_m31(forge_span_u32_t data __attribute__((unused)), uint64_t n_words __attribute__((unused)));
+static __device__ __forceinline__ uint32_t m31_inv(uint32_t a __attribute__((unused)));
+__global__ void batch_inverse_m31(forge_span_u32_t input __attribute__((unused)), forge_span_u32_t output __attribute__((unused)), uint64_t n __attribute__((unused)));
 
 static __device__ __forceinline__ uint64_t warp_reduce_sum(uint64_t val __attribute__((unused))) {
   uint64_t v __attribute__((unused)) = val;
@@ -285,7 +285,7 @@ static uint32_t m31_sub(uint32_t a __attribute__((unused)), uint32_t b __attribu
   return ((uint32_t)r);
 }
 
-static uint32_t m31_mul(uint32_t a __attribute__((unused)), uint32_t b __attribute__((unused))) {
+static __host__ __device__ __forceinline__ uint32_t m31_mul(uint32_t a __attribute__((unused)), uint32_t b __attribute__((unused))) {
   uint64_t prod __attribute__((unused)) = (((uint64_t)a) * ((uint64_t)b));
   uint64_t p __attribute__((unused)) = ((uint64_t)M31_P);
   uint64_t r __attribute__((unused)) = (prod % p);
@@ -392,22 +392,132 @@ static uint32_t qm31_sub_im_im(uint32_t a __attribute__((unused)), uint32_t b __
   return m31_sub(a, b);
 }
 
-static __host__ __device__ __forceinline__ uint32_t reduce_word(uint32_t v __attribute__((unused))) {
-  uint32_t lo __attribute__((unused)) = (v & M31_P);
-  uint32_t hi __attribute__((unused)) = (v >> 31ULL);
-  uint32_t r __attribute__((unused)) = (lo + hi);
-  if ((r >= M31_P)) {
-    return (r - M31_P);
-  } else {
-    return r;
+static __device__ __forceinline__ uint32_t m31_inv(uint32_t a __attribute__((unused))) {
+  uint32_t acc __attribute__((unused)) = 1ULL;
+  uint32_t base __attribute__((unused)) = a;
+  uint32_t forge_exp __attribute__((unused)) = (M31_P - 2ULL);
+  {
+    while ((forge_exp > 0ULL)) {
+      uint32_t acc_next __attribute__((unused)) = m31_mul(acc, base);
+      uint32_t base_next __attribute__((unused)) = m31_mul(base, base);
+      if (((forge_exp & 1ULL) == 1ULL)) {
+        acc = acc_next;
+
+      }
+      base = base_next;
+      forge_exp = (forge_exp >> 1ULL);
+    }
+
   }
+  return acc;
 }
 
-__global__ void reduce_words_to_m31(forge_span_u32_t data __attribute__((unused)), uint64_t n_words __attribute__((unused))) {
+__global__ void batch_inverse_m31(forge_span_u32_t input __attribute__((unused)), forge_span_u32_t output __attribute__((unused)), uint64_t n __attribute__((unused))) {
   uint64_t tid __attribute__((unused)) = ((blockIdx_x * blockDim_x) + threadIdx_x);
-  if ((tid < n_words)) {
-    uint32_t v __attribute__((unused)) = data.data[tid];
-    data.data[tid] = reduce_word(v);
+  uint64_t chunk __attribute__((unused)) = 64ULL;
+  uint64_t start __attribute__((unused)) = (tid * chunk);
+  if ((start < n)) {
+    uint64_t raw_end __attribute__((unused)) = (start + chunk);
+    uint64_t end;
+    if ((raw_end < n)) {
+      end = raw_end;
+    } else {
+      end = n;
+    }
+    uint64_t count __attribute__((unused)) = (end - start);
+    uint32_t prefix[64] __attribute__((unused)) = { 0 };
+    if ((start < input.len)) {
+      prefix[0ULL] = input.data[start];
+
+    }
+    uint64_t i __attribute__((unused)) = 1ULL;
+    {
+      while ((i < count)) {
+        if (((start + i) < input.len)) {
+          uint32_t val __attribute__((unused)) = input.data[(start + i)];
+          uint32_t prev __attribute__((unused)) = prefix[(i - 1ULL)];
+          if ((val == 0ULL)) {
+            prefix[i] = prev;
+
+          } else {
+            if ((val < M31_P)) {
+              if ((prev < M31_P)) {
+                prefix[i] = m31_mul(prev, val);
+
+              } else {
+                prefix[i] = prev;
+
+              }
+
+            } else {
+              prefix[i] = prev;
+
+            }
+
+          }
+
+        }
+        i = (i + 1ULL);
+      }
+
+    }
+    uint32_t total __attribute__((unused)) = prefix[(count - 1ULL)];
+    uint32_t inv0;
+    if ((total < M31_P)) {
+      inv0 = m31_inv(total);
+    } else {
+      inv0 = 0ULL;
+    }
+    uint32_t inv;
+    if ((inv0 < M31_P)) {
+      inv = inv0;
+    } else {
+      inv = 0ULL;
+    }
+    uint64_t k __attribute__((unused)) = count;
+    {
+      while ((k > 1ULL)) {
+        uint64_t i2 __attribute__((unused)) = (k - 1ULL);
+        if (((start + i2) < input.len)) {
+          if (((start + i2) < output.len)) {
+            uint32_t val __attribute__((unused)) = input.data[(start + i2)];
+            if ((val == 0ULL)) {
+              output.data[(start + i2)] = 0ULL;
+
+            } else {
+              uint32_t pre __attribute__((unused)) = prefix[(i2 - 1ULL)];
+              if ((pre < M31_P)) {
+                output.data[(start + i2)] = m31_mul(inv, pre);
+                if ((val < M31_P)) {
+                  uint32_t inv_next __attribute__((unused)) = m31_mul(inv, val);
+                  inv = inv_next;
+
+                }
+
+              } else {
+                output.data[(start + i2)] = 0ULL;
+
+              }
+
+            }
+
+          }
+
+        }
+        k = (k - 1ULL);
+      }
+
+    }
+    if ((start < output.len)) {
+      uint32_t v0;
+      if ((start < input.len)) {
+        v0 = input.data[start];
+      } else {
+        v0 = 0ULL;
+      }
+      output.data[start] = ((v0 == 0ULL) ? 0ULL : inv);
+
+    }
 
   }
 }

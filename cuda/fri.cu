@@ -4,6 +4,54 @@
 
 #include "include/qm31.cuh"
 
+// FORGE FRI wire-in: when `forge-fri` cargo feature is on, build.rs
+// defines FORGE_FRI=1. Both fold kernels redirect to FORGE host shims
+// (`cuda_fold_line_soa_forge` / `cuda_fold_circle_into_line_soa_forge`).
+// Microbench at half_n=2^19: hand-written 108µs vs FORGE 14µs (7.8x).
+// 430 proof obligations across the two .fg files (193 + 237).
+#ifdef FORGE_FRI
+extern "C" {
+    void cuda_fold_line_soa_forge(
+        const uint32_t* in0, const uint32_t* in1,
+        const uint32_t* in2, const uint32_t* in3,
+        const uint32_t* twiddles,
+        uint32_t* out0, uint32_t* out1,
+        uint32_t* out2, uint32_t* out3,
+        const uint32_t* alpha, uint32_t half_n);
+    void cuda_fold_circle_into_line_soa_forge(
+        uint32_t* dst0, uint32_t* dst1,
+        uint32_t* dst2, uint32_t* dst3,
+        const uint32_t* src0, const uint32_t* src1,
+        const uint32_t* src2, const uint32_t* src3,
+        const uint32_t* twiddles,
+        const uint32_t* alpha, const uint32_t* alpha_sq,
+        uint32_t half_n);
+}
+#define LAUNCH_FOLD_LINE(blocks, threads, in0, in1, in2, in3, tw, \
+                         out0, out1, out2, out3, alpha, half_n) \
+    cuda_fold_line_soa_forge((in0), (in1), (in2), (in3), (tw), \
+                              (out0), (out1), (out2), (out3), (alpha), (half_n))
+#define LAUNCH_FOLD_CIRCLE(blocks, threads, dst0, dst1, dst2, dst3, \
+                           src0, src1, src2, src3, tw, alpha, alpha_sq, half_n) \
+    cuda_fold_circle_into_line_soa_forge((dst0), (dst1), (dst2), (dst3), \
+                                          (src0), (src1), (src2), (src3), \
+                                          (tw), (alpha), (alpha_sq), (half_n))
+#else
+#define LAUNCH_FOLD_LINE(blocks, threads, in0, in1, in2, in3, tw, \
+                         out0, out1, out2, out3, alpha, half_n) \
+    fold_line_soa_kernel<<<(blocks), (threads)>>>( \
+        (in0), (in1), (in2), (in3), (tw), \
+        (out0), (out1), (out2), (out3), \
+        (alpha)[0], (alpha)[1], (alpha)[2], (alpha)[3], (half_n))
+#define LAUNCH_FOLD_CIRCLE(blocks, threads, dst0, dst1, dst2, dst3, \
+                           src0, src1, src2, src3, tw, alpha, alpha_sq, half_n) \
+    fold_circle_into_line_soa_kernel<<<(blocks), (threads)>>>( \
+        (dst0), (dst1), (dst2), (dst3), \
+        (src0), (src1), (src2), (src3), (tw), \
+        (alpha)[0], (alpha)[1], (alpha)[2], (alpha)[3], \
+        (alpha_sq)[0], (alpha_sq)[1], (alpha_sq)[2], (alpha_sq)[3], (half_n))
+#endif
+
 // FRI fold_line (SoA layout): folds a line evaluation by alpha.
 // Pairs consecutive elements: (values[2*i], values[2*i+1])
 // result[i] = (f0 + f1) + alpha * twiddle[i] * (f0 - f1)
@@ -90,12 +138,10 @@ void cuda_fold_line_soa(
 ) {
     uint32_t threads = 256;
     uint32_t blocks = (half_n + threads - 1) / threads;
-    fold_line_soa_kernel<<<blocks, threads>>>(
+    LAUNCH_FOLD_LINE(blocks, threads,
         in0, in1, in2, in3, twiddles,
         out0, out1, out2, out3,
-        alpha[0], alpha[1], alpha[2], alpha[3],
-        half_n
-    );
+        alpha, half_n);
 }
 
 void cuda_fold_circle_into_line_soa(
@@ -110,14 +156,10 @@ void cuda_fold_circle_into_line_soa(
 ) {
     uint32_t threads = 256;
     uint32_t blocks = (half_n + threads - 1) / threads;
-    fold_circle_into_line_soa_kernel<<<blocks, threads>>>(
+    LAUNCH_FOLD_CIRCLE(blocks, threads,
         dst0, dst1, dst2, dst3,
-        src0, src1, src2, src3,
-        twiddles,
-        alpha[0], alpha[1], alpha[2], alpha[3],
-        alpha_sq[0], alpha_sq[1], alpha_sq[2], alpha_sq[3],
-        half_n
-    );
+        src0, src1, src2, src3, twiddles,
+        alpha, alpha_sq, half_n);
 }
 
 } // extern "C"

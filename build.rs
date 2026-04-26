@@ -97,6 +97,20 @@ fn main() {
             cmd.args(["-DSHINOBI_HASH_REDUCE=1"]);
         }
 
+        // forge-ntt feature: each circle_ntt_layer_kernel<<<>>> call
+        // in cuda/circle_ntt.cu redirects to cuda_circle_ntt_layer_forge
+        // (FORGE-emitted; ~5x faster).
+        if env::var("CARGO_FEATURE_FORGE_NTT").is_ok() {
+            cmd.args(["-DFORGE_NTT=1"]);
+        }
+
+        // forge-fri feature: cuda/fri.cu's fold_line_soa_kernel and
+        // fold_circle_into_line_soa_kernel launches redirect to the
+        // FORGE host shims (~7.8x faster on the hot FRI fold path).
+        if env::var("CARGO_FEATURE_FORGE_FRI").is_ok() {
+            cmd.args(["-DFORGE_FRI=1"]);
+        }
+
         // On Windows, nvcc may reject newer MSVC/SDK versions as an unsupported host compiler.
         // Use an older MSVC (14.44 / VS 2022) and an older Windows SDK (22621) for CUDA
         // host compilation, which CUDA 13.x is known to support.
@@ -223,6 +237,13 @@ fn main() {
     }
     // Also track the cuda include directory.
     for entry in std::fs::read_dir("cuda/include").into_iter().flatten().filter_map(|e| e.ok()) {
+        println!("cargo:rerun-if-changed={}", entry.path().display());
+    }
+    // Track the forge subdir — those .cu files are `#include`'d by the
+    // top-level shims (cuda/reduce_m31.cu, cuda/merkle_hash_leaves_forge.cu)
+    // but aren't compiled directly, so cargo wouldn't otherwise notice
+    // when FORGE re-emits a kernel into cuda/forge/.
+    for entry in std::fs::read_dir("cuda/forge").into_iter().flatten().filter_map(|e| e.ok()) {
         println!("cargo:rerun-if-changed={}", entry.path().display());
     }
 }

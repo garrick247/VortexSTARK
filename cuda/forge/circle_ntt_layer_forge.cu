@@ -86,9 +86,9 @@ static __device__ __forceinline__ float warp_reduce_max_f32(float val __attribut
 static __device__ __forceinline__ float warp_reduce_min_f32(float val __attribute__((unused)));
 static uint64_t grid_stride_start(uint64_t block_idx __attribute__((unused)), uint64_t block_dim __attribute__((unused)), uint64_t thread_idx __attribute__((unused)));
 static uint64_t grid_stride_step(uint64_t block_dim __attribute__((unused)), uint64_t grid_dim __attribute__((unused)));
-static uint32_t m31_add(uint32_t a __attribute__((unused)), uint32_t b __attribute__((unused)));
-static uint32_t m31_sub(uint32_t a __attribute__((unused)), uint32_t b __attribute__((unused)));
-static uint32_t m31_mul(uint32_t a __attribute__((unused)), uint32_t b __attribute__((unused)));
+static __host__ __device__ __forceinline__ uint32_t m31_add(uint32_t a __attribute__((unused)), uint32_t b __attribute__((unused)));
+static __host__ __device__ __forceinline__ uint32_t m31_sub(uint32_t a __attribute__((unused)), uint32_t b __attribute__((unused)));
+static __host__ __device__ __forceinline__ uint32_t m31_mul(uint32_t a __attribute__((unused)), uint32_t b __attribute__((unused)));
 static uint32_t m31_neg(uint32_t a __attribute__((unused)));
 static uint32_t m31_double(uint32_t a __attribute__((unused)));
 static uint32_t cm31_mul_re(uint32_t a_re __attribute__((unused)), uint32_t a_im __attribute__((unused)), uint32_t b_re __attribute__((unused)), uint32_t b_im __attribute__((unused)));
@@ -109,8 +109,9 @@ static uint32_t qm31_sub_re_re(uint32_t a __attribute__((unused)), uint32_t b __
 static uint32_t qm31_sub_re_im(uint32_t a __attribute__((unused)), uint32_t b __attribute__((unused)));
 static uint32_t qm31_sub_im_re(uint32_t a __attribute__((unused)), uint32_t b __attribute__((unused)));
 static uint32_t qm31_sub_im_im(uint32_t a __attribute__((unused)), uint32_t b __attribute__((unused)));
-static __host__ __device__ __forceinline__ uint32_t reduce_word(uint32_t v __attribute__((unused)));
-__global__ void reduce_words_to_m31(forge_span_u32_t data __attribute__((unused)), uint64_t n_words __attribute__((unused)));
+static __device__ __forceinline__ uint32_t reduce_word(uint32_t v __attribute__((unused)));
+__global__ void circle_ntt_layer_forward(forge_span_u32_t data __attribute__((unused)), forge_span_u32_t twiddles __attribute__((unused)), uint32_t layer_idx __attribute__((unused)), uint64_t half_n __attribute__((unused)));
+__global__ void circle_ntt_layer_inverse(forge_span_u32_t data __attribute__((unused)), forge_span_u32_t twiddles __attribute__((unused)), uint32_t layer_idx __attribute__((unused)), uint64_t half_n __attribute__((unused)));
 
 static __device__ __forceinline__ uint64_t warp_reduce_sum(uint64_t val __attribute__((unused))) {
   uint64_t v __attribute__((unused)) = val;
@@ -260,7 +261,7 @@ static uint64_t grid_stride_step(uint64_t block_dim __attribute__((unused)), uin
   return (block_dim * grid_dim);
 }
 
-static uint32_t m31_add(uint32_t a __attribute__((unused)), uint32_t b __attribute__((unused))) {
+static __host__ __device__ __forceinline__ uint32_t m31_add(uint32_t a __attribute__((unused)), uint32_t b __attribute__((unused))) {
   uint64_t s __attribute__((unused)) = (((uint64_t)a) + ((uint64_t)b));
   uint64_t p __attribute__((unused)) = ((uint64_t)M31_P);
   uint64_t r;
@@ -272,7 +273,7 @@ static uint32_t m31_add(uint32_t a __attribute__((unused)), uint32_t b __attribu
   return ((uint32_t)r);
 }
 
-static uint32_t m31_sub(uint32_t a __attribute__((unused)), uint32_t b __attribute__((unused))) {
+static __host__ __device__ __forceinline__ uint32_t m31_sub(uint32_t a __attribute__((unused)), uint32_t b __attribute__((unused))) {
   uint64_t a64 __attribute__((unused)) = ((uint64_t)a);
   uint64_t b64 __attribute__((unused)) = ((uint64_t)b);
   uint64_t p __attribute__((unused)) = ((uint64_t)M31_P);
@@ -285,7 +286,7 @@ static uint32_t m31_sub(uint32_t a __attribute__((unused)), uint32_t b __attribu
   return ((uint32_t)r);
 }
 
-static uint32_t m31_mul(uint32_t a __attribute__((unused)), uint32_t b __attribute__((unused))) {
+static __host__ __device__ __forceinline__ uint32_t m31_mul(uint32_t a __attribute__((unused)), uint32_t b __attribute__((unused))) {
   uint64_t prod __attribute__((unused)) = (((uint64_t)a) * ((uint64_t)b));
   uint64_t p __attribute__((unused)) = ((uint64_t)M31_P);
   uint64_t r __attribute__((unused)) = (prod % p);
@@ -392,7 +393,7 @@ static uint32_t qm31_sub_im_im(uint32_t a __attribute__((unused)), uint32_t b __
   return m31_sub(a, b);
 }
 
-static __host__ __device__ __forceinline__ uint32_t reduce_word(uint32_t v __attribute__((unused))) {
+static __device__ __forceinline__ uint32_t reduce_word(uint32_t v __attribute__((unused))) {
   uint32_t lo __attribute__((unused)) = (v & M31_P);
   uint32_t hi __attribute__((unused)) = (v >> 31ULL);
   uint32_t r __attribute__((unused)) = (lo + hi);
@@ -403,11 +404,56 @@ static __host__ __device__ __forceinline__ uint32_t reduce_word(uint32_t v __att
   }
 }
 
-__global__ void reduce_words_to_m31(forge_span_u32_t data __attribute__((unused)), uint64_t n_words __attribute__((unused))) {
+__global__ void circle_ntt_layer_forward(forge_span_u32_t data __attribute__((unused)), forge_span_u32_t twiddles __attribute__((unused)), uint32_t layer_idx __attribute__((unused)), uint64_t half_n __attribute__((unused))) {
   uint64_t tid __attribute__((unused)) = ((blockIdx_x * blockDim_x) + threadIdx_x);
-  if ((tid < n_words)) {
-    uint32_t v __attribute__((unused)) = data.data[tid];
-    data.data[tid] = reduce_word(v);
+  if ((tid < half_n)) {
+    uint64_t stride __attribute__((unused)) = (1ULL << ((uint64_t)layer_idx));
+    uint64_t h __attribute__((unused)) = (tid >> ((uint64_t)layer_idx));
+    uint64_t l __attribute__((unused)) = (tid & (stride - 1ULL));
+    uint64_t idx0 __attribute__((unused)) = ((h << ((uint64_t)(layer_idx + 1ULL))) + l);
+    uint64_t idx1 __attribute__((unused)) = (idx0 + stride);
+    if ((idx0 < data.len)) {
+      if ((idx1 < data.len)) {
+        if ((h < twiddles.len)) {
+          uint32_t v0 __attribute__((unused)) = reduce_word(data.data[idx0]);
+          uint32_t v1 __attribute__((unused)) = reduce_word(data.data[idx1]);
+          uint32_t t __attribute__((unused)) = reduce_word(twiddles.data[h]);
+          uint32_t tmp __attribute__((unused)) = m31_mul(v1, t);
+          data.data[idx0] = m31_add(v0, tmp);
+          data.data[idx1] = m31_sub(v0, tmp);
+
+        }
+
+      }
+
+    }
+
+  }
+}
+
+__global__ void circle_ntt_layer_inverse(forge_span_u32_t data __attribute__((unused)), forge_span_u32_t twiddles __attribute__((unused)), uint32_t layer_idx __attribute__((unused)), uint64_t half_n __attribute__((unused))) {
+  uint64_t tid __attribute__((unused)) = ((blockIdx_x * blockDim_x) + threadIdx_x);
+  if ((tid < half_n)) {
+    uint64_t stride __attribute__((unused)) = (1ULL << ((uint64_t)layer_idx));
+    uint64_t h __attribute__((unused)) = (tid >> ((uint64_t)layer_idx));
+    uint64_t l __attribute__((unused)) = (tid & (stride - 1ULL));
+    uint64_t idx0 __attribute__((unused)) = ((h << ((uint64_t)(layer_idx + 1ULL))) + l);
+    uint64_t idx1 __attribute__((unused)) = (idx0 + stride);
+    if ((idx0 < data.len)) {
+      if ((idx1 < data.len)) {
+        if ((h < twiddles.len)) {
+          uint32_t v0 __attribute__((unused)) = reduce_word(data.data[idx0]);
+          uint32_t v1 __attribute__((unused)) = reduce_word(data.data[idx1]);
+          uint32_t t __attribute__((unused)) = reduce_word(twiddles.data[h]);
+          uint32_t diff __attribute__((unused)) = m31_sub(v0, v1);
+          data.data[idx0] = m31_add(v0, v1);
+          data.data[idx1] = m31_mul(diff, t);
+
+        }
+
+      }
+
+    }
 
   }
 }
