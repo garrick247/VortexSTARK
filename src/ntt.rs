@@ -299,10 +299,10 @@ impl StwoNttCache {
     /// of the first half of the coset in BRT order, then double the coset.
     pub fn new(coset: &Coset) -> Self {
         use crate::field::M31;
-        use crate::circle::CirclePoint;
+        
 
         let log_n = coset.log_size;
-        let mut twiddle_coset = Coset::half_odds(log_n - 1);
+        let twiddle_coset = Coset::half_odds(log_n - 1);
         let tc_size = twiddle_coset.size(); // 2^(log_n-1)
 
         // Build flat twiddle buffer matching stwo's slow_precompute_twiddles:
@@ -864,7 +864,7 @@ mod tests {
     /// Check: do old NTT and stwo NTT evaluate at the SAME set of circle points?
     #[test]
     fn test_old_vs_stwo_domain_points() {
-        use crate::field::M31;
+        
         use std::collections::HashSet;
         crate::cuda::ffi::init_memory_pool();
 
@@ -953,7 +953,7 @@ mod tests {
     fn test_old_intt_eval_at_oods_correctness() {
         use crate::oods::{OodsPoint, eval_at_oods_from_coeffs, qm31_from_m31};
         use crate::channel::Channel;
-        use crate::field::QM31;
+        
         crate::cuda::ffi::init_memory_pool();
 
         let log_n = 6u32;

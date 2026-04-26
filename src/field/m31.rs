@@ -159,7 +159,7 @@ mod tests {
     fn test_mul() {
         assert_eq!(M31(5) * M31(3), M31(15));
         let a = M31(1 << 16);
-        assert_eq!(a * a, M31::reduce((1u64 << 32)));
+        assert_eq!(a * a, M31::reduce(1u64 << 32));
     }
 
     #[test]

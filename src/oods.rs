@@ -432,24 +432,6 @@ pub fn draw_oods_point(channel: &mut Channel) -> OodsPoint {
     OodsPoint::from_channel(channel)
 }
 
-// ─────────────────────────────────────────────────────────────────────────────
-// Utilities for interaction trace (QM31 columns in SoA layout)
-// ─────────────────────────────────────────────────────────────────────────────
-
-/// Convert a Vec<[u32;4]> (QM31 SoA, n rows × 4 limbs) into coefficient form.
-///
-/// The interaction traces are stored as evaluations at the trace domain.
-/// INTT converts them to coefficients for OODS evaluation.
-///
-/// NOTE: For the current implementation, we skip INTT on interaction traces
-/// and return the raw values. The verifier must use the same convention.
-/// Full INTT support requires a CPU-side circle INTT implementation.
-pub fn interaction_coeffs_from_evals(evals_soa: Vec<[u32; 4]>) -> Vec<[u32; 4]> {
-    // TODO: apply CPU circle INTT once a CPU implementation is available.
-    // For Phase 1, return the raw evaluation values (treated as "coefficients"
-    // in a basis that the verifier must use consistently).
-    evals_soa
-}
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Line coefficients for OODS quotient computation

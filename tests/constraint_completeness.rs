@@ -14,7 +14,7 @@
 
 use vortexstark::cairo_air::prover::{cairo_prove, cairo_verify};
 use vortexstark::cairo_air::trace::{
-    COL_FLAGS_START, COL_INST_LO, COL_INST_HI, COL_OFF0, COL_OFF1, COL_OFF2,
+    COL_FLAGS_START, COL_INST_LO, COL_INST_HI, COL_OFF0,
     COL_DST_ADDR, COL_OP0_ADDR, COL_OP1_ADDR, COL_RES,
 };
 use vortexstark::cairo_air::decode::Instruction;

@@ -33,7 +33,7 @@ use serde::{Serialize, Deserialize};
 use super::field::{Fp, fp_to_u32x8, fp_from_u32x8, ntt_root_of_unity, batch_inverse, Channel252};
 use super::ntt::lde_cpu;
 use super::merkle::{MerkleTree252, Digest, verify_auth_path};
-use super::fri::{FriProof, FriWitness, fri_commit, fri_build_proof, fri_verify, LOG_LAST_LAYER};
+use super::fri::{FriProof, fri_commit, fri_build_proof, fri_verify, LOG_LAST_LAYER};
 
 /// Blowup factor.
 pub const LOG_BLOWUP: u32 = 2;

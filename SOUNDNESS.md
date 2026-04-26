@@ -421,7 +421,19 @@ correction comes from `verif_eval_domain.at(qi)` (natural index).
 
 **New test:** `test_soundness_oods_quotient_tamper` in `tests/property_tests.rs`.
 
-## Confidence Summary (2026-03-27)
+## Confidence Summary (last verified 2026-04-26)
+
+Confidence percentages below were assigned 2026-03-27 against the constraint
+system that is still in force today. Since then the following additional
+findings have been closed (full detail in AUDIT.md): M1 bitwise builtin
+(2026-04-23, full 32-bit input soundness), M2 EC constraint completeness
+(documented), M3 Fiat-Shamir transcript ordering, L1 ZK denominator-blinding
+formal argument, L2 initial register state, L3 program hash binding, L4
+U256InvModN test vectors, plus a 2026-04-23 robustness pass (Fiat-Shamir
+challenge binding, DoS / panic hardening, bitwise + dict memory bus links,
+proof schema version, program hash recomputation in verifier). The
+percentages have not been re-graded — they remain a 2026-03-27 lower bound.
+
 
 | Component | Confidence |
 |-----------|-----------|

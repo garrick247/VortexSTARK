@@ -174,7 +174,7 @@ fn main() {
                 dp,  // trans_factor: dummy (step transitions not tested here)
                 d_dummy_challenges.as_ptr(),
                 eval_size as u32,
-                (1u32 << vortexstark::prover::BLOWUP_BITS),
+                1u32 << vortexstark::prover::BLOWUP_BITS,
             );
         }
         drop(d_vh_inv);

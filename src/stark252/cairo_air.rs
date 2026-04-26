@@ -53,9 +53,7 @@
 //!
 //! See: https://eprint.iacr.org/2021/1063 (Cairo whitepaper), Section 4
 
-use super::field::{Fp, fp_to_u32x8, fp_from_u32x8, ntt_root_of_unity};
-use super::stark::StarkAir;
-use serde::{Serialize, Deserialize};
+use super::field::Fp;
 
 /// Number of trace columns in the Cairo VM AIR.
 pub const N_COLS: usize = 31;

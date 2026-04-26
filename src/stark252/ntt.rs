@@ -12,7 +12,7 @@
 //! Forward NTT:  a[k] = Σ_j coeff[j] · ω^{jk}   (no normalization)
 //! Inverse NTT:  coeff[j] = (1/N) · Σ_k a[k] · ω^{-jk}
 
-use super::field::{Fp, ntt_root_of_unity, batch_inverse, fp_to_u32x8, fp_from_u32x8};
+use super::field::{Fp, ntt_root_of_unity};
 use crate::device::DeviceBuffer;
 
 // ─────────────────────────────────────────────
@@ -282,7 +282,7 @@ pub fn ntt_inverse_gpu(data: &[Fp], log_n: u32) -> Vec<Fp> {
     let d_tw = DeviceBuffer::<u64>::from_host(&tw_flat);
 
     let inv_n = Fp::from_u64(n as u64).inverse();
-    let mut d_inv_n = DeviceBuffer::<u64>::from_host(&inv_n.v);
+    let d_inv_n = DeviceBuffer::<u64>::from_host(&inv_n.v);
 
     unsafe {
         crate::cuda::ffi::cuda_stark252_ntt_inverse(

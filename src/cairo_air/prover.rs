@@ -1645,8 +1645,8 @@ fn cairo_prove_cached_with_columns(
             let c29 = ma(ma(mm(f_call,f_ret), mm(f_call,f_assert)), mm(f_ret,f_assert));
             if c29 != 0 { ccheck_fails.push((row, "c29=opcexcl", c29)); }
             // Constraint 30: instruction decomposition
-            let mut rhs30 = ma(ma(off0,mm(off1,(1u32<<16))),mm(off2,2));
-            for fi in 0..14usize { rhs30 = ma(rhs30, mm(f[fi],(1u32<<(17+fi)))); }
+            let mut rhs30 = ma(ma(off0,mm(off1,1u32<<16)),mm(off2,2));
+            for fi in 0..14usize { rhs30 = ma(rhs30, mm(f[fi],1u32<<(17+fi))); }
             rhs30 = ma(rhs30, f[14]);
             let c30 = ms(ma(inst_lo,inst_hi), rhs30);
             if row == 0 { eprintln!("[CCHECK DEBUG] row=0 inst_lo={} inst_hi={} lhs={} rhs30={} f14={}", inst_lo, inst_hi, ma(inst_lo,inst_hi), rhs30, f[14]); }
@@ -4307,7 +4307,7 @@ pub fn cairo_verify(proof: &CairoProof) -> Result<(), String> {
         // binding the interaction polynomials to the execution trace via polynomial identity.
         {
             use super::logup::logup_row_contribution;
-            use super::range_check::rc_row_contribution;
+            
             let chal = &proof.logup_challenges;
             let z_mem_v  = QM31::from_u32_array([chal[0],  chal[1],  chal[2],  chal[3]]);
             let alpha_v  = QM31::from_u32_array([chal[4],  chal[5],  chal[6],  chal[7]]);

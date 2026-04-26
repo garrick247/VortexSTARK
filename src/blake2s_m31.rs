@@ -1151,7 +1151,7 @@ mod tests {
         {
             let n_leaves: u32 = 1 << 20;
             let mk = |seed: u32| -> Vec<u32> {
-                (0..n_leaves).map(|i| (i.wrapping_mul(seed) ^ 0x12345678)).collect()
+                (0..n_leaves).map(|i| i.wrapping_mul(seed) ^ 0x12345678).collect()
             };
             let cols = [mk(1), mk(2), mk(3), mk(4)];
             let d_cols: Vec<DeviceBuffer<u32>> =

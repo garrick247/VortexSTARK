@@ -483,7 +483,7 @@ pub fn verify_on_curve_cpu(x: &[u32; N_LIMBS], y: &[u32; N_LIMBS]) -> bool {
 mod tests {
     use super::*;
     use crate::cairo_air::stark252_field::{Fp, CurvePoint, pedersen_points};
-    use crate::cairo_air::pedersen::{stark252_to_fp, fp_to_stark252, Stark252, N_LIMBS};
+    use crate::cairo_air::pedersen::fp_to_stark252;
 
     #[test]
     fn test_on_curve() {

@@ -19,9 +19,9 @@
 //! 7. Fiat-Shamir: mix roots → draw query indices.
 //! 8. Decommit T_eval and Q_eval at each query.
 
-use super::field::{Fp, fp_to_u32x8, fp_from_u32x8, ntt_root_of_unity, batch_inverse, Channel252};
+use super::field::{Fp, fp_to_u32x8, ntt_root_of_unity, Channel252};
 use super::ntt::lde_cpu;
-use super::merkle::{MerkleTree252, Digest, verify_auth_path};
+use super::merkle::{MerkleTree252, Digest};
 
 use serde::{Serialize, Deserialize};
 

@@ -1511,7 +1511,7 @@ mod tests {
         let proof = cairo_prove(&program, 64, 6);
         let two = cairo_proof_to_stwo(&proof);
 
-        let log_eval = (6u32 + BLOWUP_BITS);
+        let log_eval = 6u32 + BLOWUP_BITS;
         let n_q = proof.query_indices.len();
 
         /// Helper: call MerkleVerifierLifted on 4-component QM31 leaf data.
@@ -1716,7 +1716,7 @@ mod tests {
         use stwo::core::channel::Channel as SChannel;
         use stwo::core::channel::Blake2sChannel as SBlake2sChannel;
         use stwo::core::fields::qm31::SecureField as SSecureField;
-        use stwo::core::fields::m31::BaseField as SBaseField;
+        
         use stwo::core::queries::draw_queries;
 
         ffi::init_memory_pool();
@@ -1742,7 +1742,7 @@ mod tests {
         // Convenience: convert VortexSTARK [u32;4] to stwo SecureField.
         let sf = |v: [u32; 4]| -> SSecureField {
             use stwo::core::fields::m31::M31;
-            use stwo::core::fields::cm31::CM31;
+            
             SSecureField::from_m31_array([M31(v[0]), M31(v[1]), M31(v[2]), M31(v[3])])
         };
 
@@ -1931,7 +1931,7 @@ mod tests {
 
         // Convenience: convert [u32;4] → stwo SecureField.
         let sf = |v: [u32; 4]| -> SSecureField {
-            use stwo::core::fields::cm31::CM31;
+            
             SSecureField::from_m31_array([SM31(v[0]), SM31(v[1]), SM31(v[2]), SM31(v[3])])
         };
 
@@ -2324,9 +2324,9 @@ mod tests {
             eval_data[check_pos], pt.x.0);
 
         // ── Verify canonic_domain_point matches stwo's domain enumeration ────
-        use stwo::core::circle::{Coset as SCoset, CirclePoint as SCirclePoint, M31_CIRCLE_GEN};
+        
         use stwo::core::poly::circle::CanonicCoset;
-        use stwo::core::fields::m31::M31 as SM31;
+        
 
         let stwo_domain = CanonicCoset::new(log_eval).circle_domain();
         let mut domain_mismatches = 0;
@@ -2373,9 +2373,9 @@ mod tests {
     fn test_fri_fold_chain_diagnostic() {
         use crate::cairo_air::prover::cairo_prove;
         use crate::cuda::ffi;
-        use crate::prover::BLOWUP_BITS;
-        use crate::circle::Coset;
-        use crate::field::{M31, QM31};
+        
+        
+        
         use crate::fri;
 
         use stwo::core::circle::{Coset as SCoset, CirclePoint as SCirclePoint};
@@ -2393,7 +2393,7 @@ mod tests {
         let proof = cairo_prove(&program, 64, 6);
 
         let sf = |v: [u32; 4]| -> SSecureField {
-            use stwo::core::fields::cm31::CM31;
+            
             SSecureField::from_m31_array([SM31(v[0]), SM31(v[1]), SM31(v[2]), SM31(v[3])])
         };
 
