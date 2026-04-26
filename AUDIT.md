@@ -387,7 +387,7 @@ on a valid proof is a soundness/completeness bug.
 5. **ZK blinding** (GAP-4 closed): review the formal argument in SOUNDNESS.md §GAP-4 that blinding
    all 34 trace columns (including LogUp/dict denominator columns) preserves a well-defined low-degree
    quotient polynomial for FRI
-6. **Merkle domain separation**: verify the `h[6]^=1` personalization prevents leaf/node confusion
+6. **Merkle hash construction**: confirm leaf and internal-node hashes both use standard Blake2s without h[6] personalization (matches stwo's `MerkleHasherLifted::hash_children` — `blake2s_hash_node` returns `blake2s_hash(input)` with domain=0x00; `IV6_NODE = IV6` in `cuda/blake2s.cu`). Confirm protocol-level structure (verifier-known auth-path depth + Blake2s collision resistance) carries the leaf-vs-node distinction in the n_cols=16 case where leaf and node Blake2s `t0` lengths coincide at 64.
 7. **Fiat-Shamir ordering** (M3 CLOSED 2026-04-04): `test_transcript_order_consistency` verifies
    all 12 commitment tampers are rejected. Prover and verifier mix in the same order.
 8. **Execution range gate** (GAP-2 closed): confirm `execute_to_columns_with_hints` catches all

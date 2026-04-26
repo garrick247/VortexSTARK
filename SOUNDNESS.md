@@ -151,8 +151,8 @@
   - quotient_commitment — decommit_from_host_soa4 (cpu_merkle_auth_paths_soa4)
   - all FRI layer commitments — decommit_fri_layer (cpu_merkle_auth_paths_soa4)
 - Verifier rejects empty auth paths (hard error instead of silent skip).
-- Domain separation: internal nodes use Blake2s personalization (h[6] ^= 0x01), leaves use h[6] = IV6
-- Prevents second-preimage attacks where leaf data could be confused with internal node hashes
+- Merkle hash construction: leaves and internal nodes both use standard Blake2s with `h[6] = IV6` (no personalization), matching stwo's `MerkleHasherLifted::hash_children`. `blake2s_hash_node` in `src/channel.rs` calls `blake2s_hash` with domain=0x00; `cuda/blake2s.cu` defines `IV6_NODE` as `IV6`.
+- Length-based separation: leaf inputs are `min(n_cols, 16) × 4` bytes (Blake2s `t0` reflects this); internal-node inputs are always 64 bytes. For n_cols < 16 the lengths differ and `t0` differs, producing different hashes structurally. For 16-column commits the lengths coincide; leaf-vs-node distinction in that case relies on Blake2s collision resistance plus the verifier knowing the tree depth at each auth-path step (the verifier never confuses a level-0 leaf with a level-k node).
 - test_quotient_auth_paths_reject_fake_value: DETECTED
 - test_fri_auth_paths_reject_fake_value: DETECTED
 

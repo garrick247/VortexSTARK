@@ -66,7 +66,7 @@ All Cairo VM numbers include 34 columns, 35 constraints, full LogUp+RC memory ta
 - **Instruction decomposition**: all 63 bits verified — inst_lo + inst_hi ≡ off0 + off1·2^16 + off2·2^32 + flags·2^48 (mod P)
 - **LogUp memory consistency**: memory table committed as explicit proof data; verifier checks exec_sum + table_sum == 0
 - **Range check argument**: all 16-bit offsets verified via LogUp against precomputed table, wired into prover with z_rc challenge
-- **Merkle domain separation**: internal nodes use Blake2s personalization (h[6] ^= 0x01), preventing leaf/node confusion
+- **Merkle hash construction**: leaf and internal-node hashes both use standard Blake2s without h[6] personalization, matching stwo's `MerkleHasherLifted::hash_children` (see `blake2s_hash_node` in `src/channel.rs`, which calls `blake2s_hash` with domain=0x00, and `IV6_NODE = IV6` in `cuda/blake2s.cu`). Leaf inputs are sized as `min(n_cols, 16) × 4` bytes; internal-node inputs are always 64 bytes — different lengths produce different Blake2s `t0` counters when n_cols < 16. For 16-column commits, leaf-vs-node distinction relies on Blake2s collision resistance and protocol structure (verifier knows the depth at each auth-path step) rather than algebraic personalization
 - **Full ZK**: all 34 trace columns blinded via `r · Z_H(x)` — GAP-4 closed 2026-03-26
 
 ### Remaining limitations
