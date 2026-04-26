@@ -1056,34 +1056,44 @@ fn cairo_prove_cached_with_columns(
         out
     };
 
-    // `host_eval_*_hc` is only consumed by a `#[cfg(test)]` diagnostic at
-    // line ~2120, but the CPU-side canonic→hc permute previously ran in
-    // release too. At log_n=25 that was 17 GB of pointless work on 34 cols.
-    // Compute the hc host copy only in test builds; production uses the
-    // GPU-resident `d_hc` directly.
-    let cpu_permute_to_hc = |cn: &[Vec<u32>]| -> Vec<Vec<u32>> {
-        #[cfg(test)]
-        {
-            use rayon::prelude::*;
-            return cn.par_iter()
-                .map(|c| Coset::permute_canonic_brt_to_hc_natural(c, log_eval_size))
-                .collect();
-        }
-        #[cfg(not(test))]
-        {
-            let _ = cn;
-            Vec::new()
-        }
-    };
-
     // Keep d_hc (hc-natural GPU buffers) resident only when the 34-col
     // eval-domain footprint fits in ~half the card. At log_n=25
     // (eval_size=128M, 34×512MB = 17 GB) the resident path saves one
     // H2D+permute round-trip before phase3 (~600 ms). At log_n=26
     // (34×1 GB = 34 GB) keeping them resident exhausts VRAM before
     // phase2_logup_rc can even allocate — so drop immediately after
-    // Merkle commit and re-upload from `host_eval_cols` in phase3.
-    let keep_hc_resident = (eval_size as u64) * (N_COLS as u64) * 4 <= 20u64 * 1024 * 1024 * 1024;
+    // Merkle commit and re-stream chunks from `host_eval_cols_hc` in
+    // phase3 via the slab kernel.
+    //
+    // `VORTEXSTARK_FORCE_HOST_HC=1` overrides the heuristic and forces
+    // the host-staged path even at small log_n. Used in tests to validate
+    // that the slab dispatcher produces byte-identical output to the
+    // resident path.
+    let keep_hc_resident = if std::env::var("VORTEXSTARK_FORCE_HOST_HC")
+        .map(|v| v == "1" || v == "true").unwrap_or(false)
+    {
+        false
+    } else {
+        (eval_size as u64) * (N_COLS as u64) * 4 <= 20u64 * 1024 * 1024 * 1024
+    };
+
+    // `host_eval_*_hc` (host-staged half-coset-natural copies) is needed
+    // in two cases: (1) `#[cfg(test)]` diagnostics that compare against
+    // the stwo NTT path, (2) when `keep_hc_resident` is false and phase2
+    // / phase3 need to stream chunks from host instead of holding full
+    // eval-size GPU buffers. In both cases run the CPU permute. At
+    // small log_n with keep_hc_resident=true the closure returns empty
+    // — saves ~17 GB of pointless work on 34 cols at log_n=25.
+    let cpu_permute_to_hc = |cn: &[Vec<u32>]| -> Vec<Vec<u32>> {
+        if cfg!(test) || !keep_hc_resident {
+            use rayon::prelude::*;
+            cn.par_iter()
+                .map(|c| Coset::permute_canonic_brt_to_hc_natural(c, log_eval_size))
+                .collect()
+        } else {
+            Vec::new()
+        }
+    };
 
     // ── Group A: cols 0..TRACE_LO ──────────────────────────────────────────
     let (trace_commitment, tile_roots_lo, host_eval_lo, host_eval_lo_hc, d_eval_lo_hc): ([u32; 8], Vec<[u32; 8]>, Vec<Vec<u32>>, Vec<Vec<u32>>, Vec<DeviceBuffer<u32>>) = {
@@ -1260,28 +1270,44 @@ fn cairo_prove_cached_with_columns(
     }
     let [d_sdict0, d_sdict1, d_sdict2, d_sdict3] = d_sdict_gpu;
 
-    let (dict_main_interaction_commitment, tile_roots_sdict, host_sdict, d_sdict_hc) = {
-        // GPU-resident hc: same pattern as logup/rc commits. Avoids
-        // 4 × eval_size H→D→H→D round-trip (2 GB at log_n=25).
+    let (dict_main_interaction_commitment, tile_roots_sdict, host_sdict, d_sdict_hc, host_sdict_hc) = {
+        // When keep_hc_resident=true (small log_n): GPU-permute and
+        // return d_hc on GPU. Avoids 4 × eval_size H→D→H→D round-trip
+        // (2 GB at log_n=25).
+        // When keep_hc_resident=false (log_n=26): skip the GPU
+        // allocation entirely (4 × 1 GB at log_n=26 was the OOM
+        // source) and CPU-permute into host_hc instead.
         let cn = [d_sdict0.to_host(), d_sdict1.to_host(), d_sdict2.to_host(), d_sdict3.to_host()];
-        let permute = |d_in: &DeviceBuffer<u32>| -> DeviceBuffer<u32> {
-            let mut out = DeviceBuffer::<u32>::alloc(eval_size);
-            unsafe {
-                ffi::cuda_permute_canonic_brt_to_hc_natural(
-                    d_in.as_ptr(), out.as_mut_ptr(),
-                    eval_size as u32, log_eval_size,
-                );
-            }
-            out
+        let (d_hc, host_hc): ([DeviceBuffer<u32>; 4], [Vec<u32>; 4]) = if keep_hc_resident {
+            let permute = |d_in: &DeviceBuffer<u32>| -> DeviceBuffer<u32> {
+                let mut out = DeviceBuffer::<u32>::alloc(eval_size);
+                unsafe {
+                    ffi::cuda_permute_canonic_brt_to_hc_natural(
+                        d_in.as_ptr(), out.as_mut_ptr(),
+                        eval_size as u32, log_eval_size,
+                    );
+                }
+                out
+            };
+            let d_hc = [
+                permute(&d_sdict0), permute(&d_sdict1),
+                permute(&d_sdict2), permute(&d_sdict3),
+            ];
+            unsafe { ffi::cuda_device_sync(); }
+            (d_hc, [Vec::new(), Vec::new(), Vec::new(), Vec::new()])
+        } else {
+            use rayon::prelude::*;
+            let host_hc_vec: Vec<Vec<u32>> = cn.par_iter()
+                .map(|c| Coset::permute_canonic_brt_to_hc_natural(c, log_eval_size))
+                .collect();
+            let host_hc: [Vec<u32>; 4] = host_hc_vec.try_into()
+                .expect("cn has exactly 4 limbs");
+            let placeholders = std::array::from_fn(|_| DeviceBuffer::<u32>::alloc(0));
+            (placeholders, host_hc)
         };
-        let d_hc: [DeviceBuffer<u32>; 4] = [
-            permute(&d_sdict0), permute(&d_sdict1),
-            permute(&d_sdict2), permute(&d_sdict3),
-        ];
-        unsafe { ffi::cuda_device_sync(); }
         let (root, tiles) = MerkleTree::commit_root_soa4_with_subtrees(&d_sdict0, &d_sdict1, &d_sdict2, &d_sdict3, log_eval_size);
         drop(d_sdict0); drop(d_sdict1); drop(d_sdict2); drop(d_sdict3);
-        (root, tiles, cn, d_hc)
+        (root, tiles, cn, d_hc, host_hc)
     };
     channel.mix_digest(&dict_main_interaction_commitment);
     channel.mix_digest(&[
@@ -1728,32 +1754,56 @@ fn cairo_prove_cached_with_columns(
         out
     };
 
-    let (interaction_commitment, tile_roots_logup, host_logup, d_logup_hc) = {
+    let (interaction_commitment, tile_roots_logup, host_logup, d_logup_hc, host_logup_hc) = {
         // Copy to host for later decommit work (host_logup is used by
         // decommit_from_host_soa4). The hc-natural version stays on GPU
-        // for phase3's quotient kernel — no H→D→H→D round trip.
+        // when keep_hc_resident; otherwise it's CPU-permuted into host_hc.
         let cn = [d_logup0.to_host(), d_logup1.to_host(), d_logup2.to_host(), d_logup3.to_host()];
-        let d_hc: [DeviceBuffer<u32>; 4] = [
-            gpu_permute_to_hc(&d_logup0), gpu_permute_to_hc(&d_logup1),
-            gpu_permute_to_hc(&d_logup2), gpu_permute_to_hc(&d_logup3),
-        ];
-        unsafe { ffi::cuda_device_sync(); }
+        let (d_hc, host_hc): ([DeviceBuffer<u32>; 4], [Vec<u32>; 4]) = if keep_hc_resident {
+            let d_hc = [
+                gpu_permute_to_hc(&d_logup0), gpu_permute_to_hc(&d_logup1),
+                gpu_permute_to_hc(&d_logup2), gpu_permute_to_hc(&d_logup3),
+            ];
+            unsafe { ffi::cuda_device_sync(); }
+            (d_hc, [Vec::new(), Vec::new(), Vec::new(), Vec::new()])
+        } else {
+            use rayon::prelude::*;
+            let host_hc_vec: Vec<Vec<u32>> = cn.par_iter()
+                .map(|c| Coset::permute_canonic_brt_to_hc_natural(c, log_eval_size))
+                .collect();
+            let host_hc: [Vec<u32>; 4] = host_hc_vec.try_into()
+                .expect("cn has exactly 4 limbs");
+            let placeholders = std::array::from_fn(|_| DeviceBuffer::<u32>::alloc(0));
+            (placeholders, host_hc)
+        };
         let (root, tiles) = MerkleTree::commit_root_soa4_with_subtrees(&d_logup0, &d_logup1, &d_logup2, &d_logup3, log_eval_size);
         drop(d_logup0); drop(d_logup1); drop(d_logup2); drop(d_logup3);
-        (root, tiles, cn, d_hc)
+        (root, tiles, cn, d_hc, host_hc)
     };
     channel.mix_digest(&interaction_commitment);
 
-    let (rc_interaction_commitment, tile_roots_rc, host_rc_logup, d_rc_logup_hc) = {
+    let (rc_interaction_commitment, tile_roots_rc, host_rc_logup, d_rc_logup_hc, host_rc_logup_hc) = {
         let cn = [rc_d0.to_host(), rc_d1.to_host(), rc_d2.to_host(), rc_d3.to_host()];
-        let d_hc: [DeviceBuffer<u32>; 4] = [
-            gpu_permute_to_hc(&rc_d0), gpu_permute_to_hc(&rc_d1),
-            gpu_permute_to_hc(&rc_d2), gpu_permute_to_hc(&rc_d3),
-        ];
-        unsafe { ffi::cuda_device_sync(); }
+        let (d_hc, host_hc): ([DeviceBuffer<u32>; 4], [Vec<u32>; 4]) = if keep_hc_resident {
+            let d_hc = [
+                gpu_permute_to_hc(&rc_d0), gpu_permute_to_hc(&rc_d1),
+                gpu_permute_to_hc(&rc_d2), gpu_permute_to_hc(&rc_d3),
+            ];
+            unsafe { ffi::cuda_device_sync(); }
+            (d_hc, [Vec::new(), Vec::new(), Vec::new(), Vec::new()])
+        } else {
+            use rayon::prelude::*;
+            let host_hc_vec: Vec<Vec<u32>> = cn.par_iter()
+                .map(|c| Coset::permute_canonic_brt_to_hc_natural(c, log_eval_size))
+                .collect();
+            let host_hc: [Vec<u32>; 4] = host_hc_vec.try_into()
+                .expect("cn has exactly 4 limbs");
+            let placeholders = std::array::from_fn(|_| DeviceBuffer::<u32>::alloc(0));
+            (placeholders, host_hc)
+        };
         let (root, tiles) = MerkleTree::commit_root_soa4_with_subtrees(&rc_d0, &rc_d1, &rc_d2, &rc_d3, log_eval_size);
         drop(rc_d0); drop(rc_d1); drop(rc_d2); drop(rc_d3);
-        (root, tiles, cn, d_hc)
+        (root, tiles, cn, d_hc, host_hc)
     };
     channel.mix_digest(&rc_interaction_commitment);
 
@@ -1764,38 +1814,52 @@ fn cairo_prove_cached_with_columns(
     let ntt_qm31 = |data: &[Vec<u32>; 4]| -> [DeviceBuffer<u32>; 4] {
         std::array::from_fn(|c| stwo_ntt_lde(DeviceBuffer::from_host_chunked(&data[c])))
     };
-    // Keep the hc-natural GPU buffers alive after commit — the quotient
-    // phase consumes them, and re-uploading via host Vec was a 5×4×eval_size
-    // H→D round-trip (16 GB at log_n=25). The `cn` host copy is still
-    // needed for the later decommit (`logup_t{1,2,3}_decom`, `rc_u{1,2}_decom`).
+    // Keep the hc-natural buffers alive after commit — the quotient
+    // phase consumes them. When keep_hc_resident is true (small log_n)
+    // the buffers stay on GPU; when false (log_n >= 26) they are
+    // CPU-permuted into host arrays so phase3 can stream chunks via
+    // the slab kernel without the 20 GB GPU pressure that the always-
+    // resident path produced. The `cn` host copy is still needed for
+    // the later decommit (`logup_t{1,2,3}_decom`, `rc_u{1,2}_decom`).
     let commit_qm31_keep_hc = |d: [DeviceBuffer<u32>; 4]| -> (
-        [u32; 8], Vec<[u32; 8]>, [Vec<u32>; 4], [DeviceBuffer<u32>; 4]
+        [u32; 8], Vec<[u32; 8]>, [Vec<u32>; 4], [DeviceBuffer<u32>; 4], [Vec<u32>; 4]
     ) {
         let cn: [Vec<u32>; 4] = std::array::from_fn(|i| d[i].to_host());
-        // GPU permute: canonic-BRT → hc-natural on device, no H→D round trip.
-        let d_hc: [DeviceBuffer<u32>; 4] = std::array::from_fn(|i| {
-            let mut out = DeviceBuffer::<u32>::alloc(eval_size);
-            unsafe {
-                ffi::cuda_permute_canonic_brt_to_hc_natural(
-                    d[i].as_ptr(), out.as_mut_ptr(),
-                    eval_size as u32, log_eval_size,
-                );
-            }
-            out
-        });
-        unsafe { ffi::cuda_device_sync(); }
+        let (d_hc, host_hc): ([DeviceBuffer<u32>; 4], [Vec<u32>; 4]) = if keep_hc_resident {
+            let d_hc: [DeviceBuffer<u32>; 4] = std::array::from_fn(|i| {
+                let mut out = DeviceBuffer::<u32>::alloc(eval_size);
+                unsafe {
+                    ffi::cuda_permute_canonic_brt_to_hc_natural(
+                        d[i].as_ptr(), out.as_mut_ptr(),
+                        eval_size as u32, log_eval_size,
+                    );
+                }
+                out
+            });
+            unsafe { ffi::cuda_device_sync(); }
+            (d_hc, [Vec::new(), Vec::new(), Vec::new(), Vec::new()])
+        } else {
+            use rayon::prelude::*;
+            let host_hc_vec: Vec<Vec<u32>> = cn.par_iter()
+                .map(|c| Coset::permute_canonic_brt_to_hc_natural(c, log_eval_size))
+                .collect();
+            let host_hc: [Vec<u32>; 4] = host_hc_vec.try_into()
+                .expect("cn has exactly 4 limbs");
+            let placeholders = std::array::from_fn(|_| DeviceBuffer::<u32>::alloc(0));
+            (placeholders, host_hc)
+        };
         let (root, tiles) = MerkleTree::commit_root_soa4_with_subtrees(&d[0], &d[1], &d[2], &d[3], log_eval_size);
-        (root, tiles, cn, d_hc)
+        (root, tiles, cn, d_hc, host_hc)
     };
-    let (logup_t1_commitment, _tr_t1, _cn_t1, d_t1_hc) = commit_qm31_keep_hc(ntt_qm31(&logup_t1_trace));
+    let (logup_t1_commitment, _tr_t1, _cn_t1, d_t1_hc, host_t1_hc) = commit_qm31_keep_hc(ntt_qm31(&logup_t1_trace));
     channel.mix_digest(&logup_t1_commitment);
-    let (logup_t2_commitment, _tr_t2, _cn_t2, d_t2_hc) = commit_qm31_keep_hc(ntt_qm31(&logup_t2_trace));
+    let (logup_t2_commitment, _tr_t2, _cn_t2, d_t2_hc, host_t2_hc) = commit_qm31_keep_hc(ntt_qm31(&logup_t2_trace));
     channel.mix_digest(&logup_t2_commitment);
-    let (logup_t3_commitment, _tr_t3, _cn_t3, d_t3_hc) = commit_qm31_keep_hc(ntt_qm31(&logup_t3_trace));
+    let (logup_t3_commitment, _tr_t3, _cn_t3, d_t3_hc, host_t3_hc) = commit_qm31_keep_hc(ntt_qm31(&logup_t3_trace));
     channel.mix_digest(&logup_t3_commitment);
-    let (rc_u1_commitment, _tr_u1, _cn_u1, d_u1_hc) = commit_qm31_keep_hc(ntt_qm31(&rc_u1_trace));
+    let (rc_u1_commitment, _tr_u1, _cn_u1, d_u1_hc, host_u1_hc) = commit_qm31_keep_hc(ntt_qm31(&rc_u1_trace));
     channel.mix_digest(&rc_u1_commitment);
-    let (rc_u2_commitment, _tr_u2, _cn_u2, d_u2_hc) = commit_qm31_keep_hc(ntt_qm31(&rc_u2_trace));
+    let (rc_u2_commitment, _tr_u2, _cn_u2, d_u2_hc, host_u2_hc) = commit_qm31_keep_hc(ntt_qm31(&rc_u2_trace));
     channel.mix_digest(&rc_u2_commitment);
 
     // Bind LogUp and RC final sums into Fiat-Shamir (tampering breaks FRI)
@@ -1870,36 +1934,6 @@ fn cairo_prove_cached_with_columns(
     let constraint_alphas: Vec<QM31> = (0..N_CONSTRAINTS).map(|_| channel.draw_felt()).collect();
     let alpha_flat: Vec<u32> = constraint_alphas.iter().flat_map(|a| a.to_u32_array()).collect();
 
-    // Use GPU-resident hc-natural buffers when commit-time fit allows
-    // (keep_hc_resident in ntt_blind_commit above). When log_eval_size
-    // pushed the 34-col resident footprint past the VRAM budget, the
-    // `d_eval_*_hc` vecs are empty — rebuild here from `host_eval_cols`
-    // (canonic-BRT) via a pinned H2D + GPU permute to hc-natural.
-    let mut d_quot_cols: Vec<DeviceBuffer<u32>> = Vec::with_capacity(N_COLS);
-    if !d_eval_lo_hc.is_empty() {
-        d_quot_cols.extend(d_eval_lo_hc);
-        d_quot_cols.extend(d_eval_hi_hc);
-        d_quot_cols.extend(d_eval_dict_hc);
-    } else {
-        // Rebuild 34 hc-natural GPU buffers from the canonic-BRT host
-        // snapshot. Upload → GPU permute in place via a scratch buffer.
-        d_quot_cols.reserve(N_COLS);
-        for c in 0..N_COLS {
-            let d_src = DeviceBuffer::<u32>::from_host_chunked(&host_eval_cols[c]);
-            let mut d_hc = DeviceBuffer::<u32>::alloc(eval_size);
-            unsafe {
-                ffi::cuda_permute_canonic_brt_to_hc_natural(
-                    d_src.as_ptr(), d_hc.as_mut_ptr(),
-                    eval_size as u32, log_eval_size,
-                );
-            }
-            drop(d_src);
-            d_quot_cols.push(d_hc);
-        }
-        unsafe { ffi::cuda_device_sync(); }
-    }
-    let col_ptrs: Vec<*const u32> = d_quot_cols.iter().map(|b| b.as_ptr()).collect();
-    let d_col_ptrs = DeviceBuffer::from_host(&col_ptrs);
     let d_alpha = DeviceBuffer::from_host(&alpha_flat);
 
     // Compute V_H^{-1} pointwise over the evaluation domain (half_coset natural order).
@@ -1952,22 +1986,6 @@ fn cairo_prove_cached_with_columns(
     };
     q3_tag("trans_factor_compute");
 
-    // Upload interaction columns + T/U intermediate columns for constraint kernel.
-    // logup, rc_logup are now GPU-resident from commit phase — move out of
-    // d_logup_hc / d_rc_logup_hc. sdict is still built via the old path
-    // (see `host_sdict_hc` allocation) so it still needs uploading.
-    let [d_slogup0, d_slogup1, d_slogup2, d_slogup3] = d_logup_hc;
-    let [d_src0, d_src1, d_src2, d_src3] = d_rc_logup_hc;
-    let [d_sd0, d_sd1, d_sd2, d_sd3] = d_sdict_hc;
-    // T/U intermediate columns — already GPU-resident from commit phase.
-    // Move out of d_*_hc (consumed here; no further use after the kernel call).
-    let dt1 = d_t1_hc;
-    let dt2 = d_t2_hc;
-    let dt3 = d_t3_hc;
-    let du1 = d_u1_hc;
-    let du2 = d_u2_hc;
-    q3_tag("h2d_uploads_remaining");
-
     // Pack challenges: [z_mem(4), alpha_mem(4), alpha_mem_sq(4), z_rc(4), z_dict_link(4), alpha_dict_link(4)] = 24 u32s.
     let challenges_flat: Vec<u32> = z_mem.to_u32_array().iter()
         .chain(alpha_mem.to_u32_array().iter())
@@ -1980,41 +1998,187 @@ fn cairo_prove_cached_with_columns(
         .expect("challenges must be exactly 24 u32s (6 QM31 values)");
     let d_challenges = DeviceBuffer::from_host(&challenges_flat);
 
+    // Output buffers — full eval_size in both paths.
     let mut q0 = DeviceBuffer::<u32>::alloc(eval_size);
     let mut q1 = DeviceBuffer::<u32>::alloc(eval_size);
     let mut q2 = DeviceBuffer::<u32>::alloc(eval_size);
     let mut q3 = DeviceBuffer::<u32>::alloc(eval_size);
 
-    unsafe {
-        ffi::cuda_cairo_quotient(
-            d_col_ptrs.as_ptr() as *const *const u32,
-            d_slogup0.as_ptr(), d_slogup1.as_ptr(), d_slogup2.as_ptr(), d_slogup3.as_ptr(),
-            dt1[0].as_ptr(), dt1[1].as_ptr(), dt1[2].as_ptr(), dt1[3].as_ptr(),
-            dt2[0].as_ptr(), dt2[1].as_ptr(), dt2[2].as_ptr(), dt2[3].as_ptr(),
-            dt3[0].as_ptr(), dt3[1].as_ptr(), dt3[2].as_ptr(), dt3[3].as_ptr(),
-            d_src0.as_ptr(), d_src1.as_ptr(), d_src2.as_ptr(), d_src3.as_ptr(),
-            du1[0].as_ptr(), du1[1].as_ptr(), du1[2].as_ptr(), du1[3].as_ptr(),
-            du2[0].as_ptr(), du2[1].as_ptr(), du2[2].as_ptr(), du2[3].as_ptr(),
-            d_sd0.as_ptr(), d_sd1.as_ptr(), d_sd2.as_ptr(), d_sd3.as_ptr(),
-            q0.as_mut_ptr(), q1.as_mut_ptr(), q2.as_mut_ptr(), q3.as_mut_ptr(),
-            d_alpha.as_ptr(),
-            d_vh_inv.as_ptr(),
-            d_trans_factor.as_ptr(),
-            d_challenges.as_ptr(),
-            eval_size as u32,
-            1u32 << crate::prover::BLOWUP_BITS,
-        );
-        ffi::cuda_device_sync();
+    if keep_hc_resident {
+        // ── EXISTING PATH: data fits resident, single full-eval kernel call ──
+        // 34 trace cols on GPU as either preserved phase1 d_eval_*_hc or
+        // rebuilt from host_eval_cols (small log_n only).
+        let mut d_quot_cols: Vec<DeviceBuffer<u32>> = Vec::with_capacity(N_COLS);
+        if !d_eval_lo_hc.is_empty() {
+            d_quot_cols.extend(d_eval_lo_hc);
+            d_quot_cols.extend(d_eval_hi_hc);
+            d_quot_cols.extend(d_eval_dict_hc);
+        } else {
+            d_quot_cols.reserve(N_COLS);
+            for c in 0..N_COLS {
+                let d_src = DeviceBuffer::<u32>::from_host_chunked(&host_eval_cols[c]);
+                let mut d_hc = DeviceBuffer::<u32>::alloc(eval_size);
+                unsafe {
+                    ffi::cuda_permute_canonic_brt_to_hc_natural(
+                        d_src.as_ptr(), d_hc.as_mut_ptr(),
+                        eval_size as u32, log_eval_size,
+                    );
+                }
+                drop(d_src);
+                d_quot_cols.push(d_hc);
+            }
+            unsafe { ffi::cuda_device_sync(); }
+        }
+        let col_ptrs: Vec<*const u32> = d_quot_cols.iter().map(|b| b.as_ptr()).collect();
+        let d_col_ptrs = DeviceBuffer::from_host(&col_ptrs);
+
+        let [d_slogup0, d_slogup1, d_slogup2, d_slogup3] = d_logup_hc;
+        let [d_src0, d_src1, d_src2, d_src3] = d_rc_logup_hc;
+        let [d_sd0, d_sd1, d_sd2, d_sd3] = d_sdict_hc;
+        let dt1 = d_t1_hc;
+        let dt2 = d_t2_hc;
+        let dt3 = d_t3_hc;
+        let du1 = d_u1_hc;
+        let du2 = d_u2_hc;
+        q3_tag("h2d_uploads_remaining");
+
+        unsafe {
+            ffi::cuda_cairo_quotient(
+                d_col_ptrs.as_ptr() as *const *const u32,
+                d_slogup0.as_ptr(), d_slogup1.as_ptr(), d_slogup2.as_ptr(), d_slogup3.as_ptr(),
+                dt1[0].as_ptr(), dt1[1].as_ptr(), dt1[2].as_ptr(), dt1[3].as_ptr(),
+                dt2[0].as_ptr(), dt2[1].as_ptr(), dt2[2].as_ptr(), dt2[3].as_ptr(),
+                dt3[0].as_ptr(), dt3[1].as_ptr(), dt3[2].as_ptr(), dt3[3].as_ptr(),
+                d_src0.as_ptr(), d_src1.as_ptr(), d_src2.as_ptr(), d_src3.as_ptr(),
+                du1[0].as_ptr(), du1[1].as_ptr(), du1[2].as_ptr(), du1[3].as_ptr(),
+                du2[0].as_ptr(), du2[1].as_ptr(), du2[2].as_ptr(), du2[3].as_ptr(),
+                d_sd0.as_ptr(), d_sd1.as_ptr(), d_sd2.as_ptr(), d_sd3.as_ptr(),
+                q0.as_mut_ptr(), q1.as_mut_ptr(), q2.as_mut_ptr(), q3.as_mut_ptr(),
+                d_alpha.as_ptr(),
+                d_vh_inv.as_ptr(),
+                d_trans_factor.as_ptr(),
+                d_challenges.as_ptr(),
+                eval_size as u32,
+                1u32 << crate::prover::BLOWUP_BITS,
+            );
+            ffi::cuda_device_sync();
+        }
+        // GPU bufs drop at end of this block.
+        drop(d_slogup0); drop(d_slogup1); drop(d_slogup2); drop(d_slogup3);
+        drop(d_src0); drop(d_src1); drop(d_src2); drop(d_src3);
+        drop(d_sd0); drop(d_sd1); drop(d_sd2); drop(d_sd3);
+        drop(d_quot_cols);
+        drop(d_col_ptrs);
+    } else {
+        // ── SLAB DISPATCH: stream chunks from host_*_hc through the
+        //    slab kernel. d_*_hc buffers are zero-sized placeholders here
+        //    (phase2 skipped the GPU permute). At log_n=26 (eval_size=2^28)
+        //    n_chunks=16 keeps per-chunk GPU peak ≈ (chunk_n + blowup_step)
+        //    × (34 trace + 32 side limb) cols × 4 bytes ≈ 4 GB, plus the
+        //    full-size q outputs (4 GB) — fits comfortably under 32 GB. ──
+        // Drop unused placeholder GPU bufs from phase2 (`alloc(0)` no-ops
+        // but explicit drop frees the struct).
+        drop(d_logup_hc); drop(d_rc_logup_hc); drop(d_sdict_hc);
+        drop(d_t1_hc); drop(d_t2_hc); drop(d_t3_hc);
+        drop(d_u1_hc); drop(d_u2_hc);
+
+        let blowup_step: u32 = 1u32 << crate::prover::BLOWUP_BITS;
+        // Choose n_chunks such that per-chunk slab GPU footprint stays
+        // well under the budget. At log_n<=24, eval_size <= 64M; one chunk
+        // with wrap-buffer is ~4% extra and acceptable. At log_n=25,
+        // n_chunks=8 gives ~16M rows/chunk. At log_n=26, n_chunks=16.
+        let n_chunks: u32 = if (eval_size as u64) >= (1u64 << 28) {
+            16
+        } else if (eval_size as u64) >= (1u64 << 27) {
+            8
+        } else if (eval_size as u64) >= (1u64 << 26) {
+            4
+        } else {
+            1
+        };
+        let chunk_n: u32 = (eval_size as u32) / n_chunks;
+        debug_assert_eq!((chunk_n as u64) * (n_chunks as u64), eval_size as u64,
+            "eval_size must be evenly divisible by n_chunks");
+        let slab_n: u32 = chunk_n + blowup_step;
+        debug_assert!((slab_n as u64) * 4 <= (eval_size as u64) * 4,
+            "slab_n must not exceed full eval_size for the wrap math to be valid");
+
+        // Helper: upload `slab_n` rows from `host_data` starting at
+        // `chunk_offset`, with wrap-around if the slab spans the end.
+        let upload_slab = |host_data: &[u32], chunk_offset: u32| -> DeviceBuffer<u32> {
+            let end = chunk_offset.checked_add(slab_n).expect("offset + slab_n overflow");
+            if end <= eval_size as u32 {
+                DeviceBuffer::from_host_chunked(
+                    &host_data[chunk_offset as usize..end as usize]
+                )
+            } else {
+                let primary = &host_data[chunk_offset as usize..];
+                let wrap_n = end - eval_size as u32;
+                let mut combined = Vec::with_capacity(slab_n as usize);
+                combined.extend_from_slice(primary);
+                combined.extend_from_slice(&host_data[..wrap_n as usize]);
+                DeviceBuffer::from_host_chunked(&combined)
+            }
+        };
+        let upload_4limb = |hc: &[Vec<u32>; 4], chunk_offset: u32| -> [DeviceBuffer<u32>; 4] {
+            std::array::from_fn(|i| upload_slab(&hc[i], chunk_offset))
+        };
+
+        for chunk_idx in 0..n_chunks {
+            let chunk_offset = chunk_idx * chunk_n;
+
+            // Upload 34 trace col slabs.
+            let trace_slabs: Vec<DeviceBuffer<u32>> = (0..N_COLS).map(|c| {
+                upload_slab(&host_eval_cols_hc[c], chunk_offset)
+            }).collect();
+            let trace_ptrs: Vec<*const u32> = trace_slabs.iter().map(|b| b.as_ptr()).collect();
+            let d_trace_ptrs = DeviceBuffer::from_host(&trace_ptrs);
+
+            let logup_slab  = upload_4limb(&host_logup_hc,    chunk_offset);
+            let rc_slab     = upload_4limb(&host_rc_logup_hc, chunk_offset);
+            let sdict_slab  = upload_4limb(&host_sdict_hc,    chunk_offset);
+            let t1_slab     = upload_4limb(&host_t1_hc,       chunk_offset);
+            let t2_slab     = upload_4limb(&host_t2_hc,       chunk_offset);
+            let t3_slab     = upload_4limb(&host_t3_hc,       chunk_offset);
+            let u1_slab     = upload_4limb(&host_u1_hc,       chunk_offset);
+            let u2_slab     = upload_4limb(&host_u2_hc,       chunk_offset);
+
+            unsafe {
+                ffi::cuda_cairo_quotient_slab(
+                    d_trace_ptrs.as_ptr() as *const *const u32,
+                    logup_slab[0].as_ptr(), logup_slab[1].as_ptr(),
+                    logup_slab[2].as_ptr(), logup_slab[3].as_ptr(),
+                    t1_slab[0].as_ptr(), t1_slab[1].as_ptr(),
+                    t1_slab[2].as_ptr(), t1_slab[3].as_ptr(),
+                    t2_slab[0].as_ptr(), t2_slab[1].as_ptr(),
+                    t2_slab[2].as_ptr(), t2_slab[3].as_ptr(),
+                    t3_slab[0].as_ptr(), t3_slab[1].as_ptr(),
+                    t3_slab[2].as_ptr(), t3_slab[3].as_ptr(),
+                    rc_slab[0].as_ptr(), rc_slab[1].as_ptr(),
+                    rc_slab[2].as_ptr(), rc_slab[3].as_ptr(),
+                    u1_slab[0].as_ptr(), u1_slab[1].as_ptr(),
+                    u1_slab[2].as_ptr(), u1_slab[3].as_ptr(),
+                    u2_slab[0].as_ptr(), u2_slab[1].as_ptr(),
+                    u2_slab[2].as_ptr(), u2_slab[3].as_ptr(),
+                    sdict_slab[0].as_ptr(), sdict_slab[1].as_ptr(),
+                    sdict_slab[2].as_ptr(), sdict_slab[3].as_ptr(),
+                    q0.as_mut_ptr(), q1.as_mut_ptr(), q2.as_mut_ptr(), q3.as_mut_ptr(),
+                    d_alpha.as_ptr(),
+                    d_vh_inv.as_ptr(),
+                    d_trans_factor.as_ptr(),
+                    d_challenges.as_ptr(),
+                    chunk_n, blowup_step, chunk_offset,
+                );
+                ffi::cuda_device_sync();
+            }
+            // All chunk GPU bufs drop here, freeing memory before next chunk.
+        }
+        q3_tag("cairo_quotient_kernel_slab");
     }
-    drop(d_slogup0); drop(d_slogup1); drop(d_slogup2); drop(d_slogup3);
-    drop(d_src0); drop(d_src1); drop(d_src2); drop(d_src3);
-    drop(d_sd0); drop(d_sd1); drop(d_sd2); drop(d_sd3);
+
     drop(d_challenges);
     drop(d_vh_inv);
     drop(d_trans_factor);
-    // Free quotient-phase eval cols — trace data stays on host_eval_cols
-    drop(d_quot_cols);
-    drop(d_col_ptrs);
     drop(d_alpha);
     q3_tag("cairo_quotient_kernel");
 
