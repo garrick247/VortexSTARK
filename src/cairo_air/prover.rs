@@ -2829,6 +2829,7 @@ fn cairo_prove_cached_with_columns(
         nonce
     };
     channel.mix_u64(pow_nonce);
+    phase_tag("phase5a_pow_grind");
 
     let query_indices = channel.draw_query_indices(log_eval_size, N_QUERIES);
 

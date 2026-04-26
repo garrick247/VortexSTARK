@@ -194,24 +194,49 @@ pub fn evaluate_batch(columns: &mut [DeviceBuffer<u32>], cache: &impl ForwardTwi
     }
     let log_n = cache.log_n();
     let n = 1u32 << log_n;
-    let n_cols = columns.len() as u32;
     let n_line_layers = if log_n > 0 { log_n - 1 } else { 0 };
 
-    // Build array of device pointers
-    let ptrs: Vec<*mut u32> = columns.iter_mut().map(|c| c.as_mut_ptr()).collect();
-    let d_ptrs = DeviceBuffer::from_host(&ptrs);
+    // Under `forge-ntt`, dispatch each column through the single-col
+    // evaluate (which routes the per-layer butterfly through the FORGE
+    // kernel via the LAUNCH_NTT_LAYER macro). Trades batching efficiency
+    // for the FORGE kernel's per-thread speedup. The batched
+    // (multi-column SoA) FORGE port is blocked on FORGE language work
+    // for pointer-array / `span<span<u32>>` types.
+    #[cfg(feature = "forge-ntt")]
+    {
+        for col in columns.iter_mut() {
+            unsafe {
+                ffi::cuda_circle_ntt_evaluate(
+                    col.as_mut_ptr(),
+                    cache.twiddles_ptr(),
+                    cache.circle_twids_ptr(),
+                    cache.layer_offsets().as_ptr(),
+                    cache.layer_sizes().as_ptr(),
+                    n_line_layers,
+                    n,
+                );
+            }
+        }
+        return;
+    }
 
-    unsafe {
-        ffi::cuda_circle_ntt_evaluate_batch(
-            d_ptrs.as_ptr() as *mut *mut u32,
-            cache.twiddles_ptr(),
-            cache.circle_twids_ptr(),
-            cache.layer_offsets().as_ptr(),
-            cache.layer_sizes().as_ptr(),
-            n_line_layers,
-            n,
-            n_cols,
-        );
+    #[cfg(not(feature = "forge-ntt"))]
+    {
+        let n_cols = columns.len() as u32;
+        let ptrs: Vec<*mut u32> = columns.iter_mut().map(|c| c.as_mut_ptr()).collect();
+        let d_ptrs = DeviceBuffer::from_host(&ptrs);
+        unsafe {
+            ffi::cuda_circle_ntt_evaluate_batch(
+                d_ptrs.as_ptr() as *mut *mut u32,
+                cache.twiddles_ptr(),
+                cache.circle_twids_ptr(),
+                cache.layer_offsets().as_ptr(),
+                cache.layer_sizes().as_ptr(),
+                n_line_layers,
+                n,
+                n_cols,
+            );
+        }
     }
 }
 
@@ -222,23 +247,43 @@ pub fn interpolate_batch(columns: &mut [DeviceBuffer<u32>], cache: &impl Inverse
     }
     let log_n = cache.log_n();
     let n = 1u32 << log_n;
-    let n_cols = columns.len() as u32;
     let n_line_layers = if log_n > 0 { log_n - 1 } else { 0 };
 
-    let ptrs: Vec<*mut u32> = columns.iter_mut().map(|c| c.as_mut_ptr()).collect();
-    let d_ptrs = DeviceBuffer::from_host(&ptrs);
+    #[cfg(feature = "forge-ntt")]
+    {
+        for col in columns.iter_mut() {
+            unsafe {
+                ffi::cuda_circle_ntt_interpolate(
+                    col.as_mut_ptr(),
+                    cache.itwiddles_ptr(),
+                    cache.circle_itwids_ptr(),
+                    cache.ilayer_offsets().as_ptr(),
+                    cache.ilayer_sizes().as_ptr(),
+                    n_line_layers,
+                    n,
+                );
+            }
+        }
+        return;
+    }
 
-    unsafe {
-        ffi::cuda_circle_ntt_interpolate_batch(
-            d_ptrs.as_ptr() as *mut *mut u32,
-            cache.itwiddles_ptr(),
-            cache.circle_itwids_ptr(),
-            cache.ilayer_offsets().as_ptr(),
-            cache.ilayer_sizes().as_ptr(),
-            n_line_layers,
-            n,
-            n_cols,
-        );
+    #[cfg(not(feature = "forge-ntt"))]
+    {
+        let n_cols = columns.len() as u32;
+        let ptrs: Vec<*mut u32> = columns.iter_mut().map(|c| c.as_mut_ptr()).collect();
+        let d_ptrs = DeviceBuffer::from_host(&ptrs);
+        unsafe {
+            ffi::cuda_circle_ntt_interpolate_batch(
+                d_ptrs.as_ptr() as *mut *mut u32,
+                cache.itwiddles_ptr(),
+                cache.circle_itwids_ptr(),
+                cache.ilayer_offsets().as_ptr(),
+                cache.ilayer_sizes().as_ptr(),
+                n_line_layers,
+                n,
+                n_cols,
+            );
+        }
     }
 }
 
