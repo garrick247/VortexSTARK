@@ -1997,7 +1997,7 @@ fn cairo_prove_cached_with_columns(
             d_trans_factor.as_ptr(),
             d_challenges.as_ptr(),
             eval_size as u32,
-            (1u32 << crate::prover::BLOWUP_BITS),
+            1u32 << crate::prover::BLOWUP_BITS,
         );
         ffi::cuda_device_sync();
     }
