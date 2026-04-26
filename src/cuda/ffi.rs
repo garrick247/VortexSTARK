@@ -375,6 +375,35 @@ unsafe extern "C" {
         data: *mut u32, twiddles: *const u32,
         layer_idx: u32, n: u32, forward: i32,
     );
+
+    /// FORGE-emitted batched Circle NTT (multi-column SoA, full
+    /// evaluate / interpolate). Source:
+    /// forge/analysis/vortex_ntt/circle_ntt_batch.fg (148 obligations
+    /// across 3 kernels: forward butterfly, inverse butterfly, scale).
+    /// Same ABI as `cuda_circle_ntt_evaluate_batch`. Drop-in
+    /// replacement when `forge-ntt` is on, supplanting the prior
+    /// loop-of-single-col fallback.
+    pub fn cuda_circle_ntt_evaluate_batch_forge(
+        col_ptrs: *const *mut u32,
+        d_twiddles: *const u32,
+        d_circle_twids: *const u32,
+        h_layer_offsets: *const u32,
+        h_layer_sizes: *const u32,
+        n_line_layers: u32,
+        n: u32,
+        n_cols: u32,
+    );
+
+    pub fn cuda_circle_ntt_interpolate_batch_forge(
+        col_ptrs: *const *mut u32,
+        d_itwiddles: *const u32,
+        d_circle_itwids: *const u32,
+        h_layer_offsets: *const u32,
+        h_layer_sizes: *const u32,
+        n_line_layers: u32,
+        n: u32,
+        n_cols: u32,
+    );
 }
 
 // Twiddle computation kernels

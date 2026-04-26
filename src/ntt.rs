@@ -196,34 +196,30 @@ pub fn evaluate_batch(columns: &mut [DeviceBuffer<u32>], cache: &impl ForwardTwi
     let n = 1u32 << log_n;
     let n_line_layers = if log_n > 0 { log_n - 1 } else { 0 };
 
-    // Under `forge-ntt`, dispatch each column through the single-col
-    // evaluate (which routes the per-layer butterfly through the FORGE
-    // kernel via the LAUNCH_NTT_LAYER macro). Trades batching efficiency
-    // for the FORGE kernel's per-thread speedup. The batched
-    // (multi-column SoA) FORGE port is blocked on FORGE language work
-    // for pointer-array / `span<span<u32>>` types.
+    let n_cols = columns.len() as u32;
+    let ptrs: Vec<*mut u32> = columns.iter_mut().map(|c| c.as_mut_ptr()).collect();
+
+    // Under `forge-ntt`, dispatch through the FORGE-emitted batched
+    // kernel (`cuda_circle_ntt_evaluate_batch_forge`, sourced from
+    // forge/analysis/vortex_ntt/circle_ntt_batch.fg, 148 obligations).
+    // Same shape as the hand-written batched kernel — n_cols columns
+    // processed per layer launch via `span<span<u32>>` device input.
     #[cfg(feature = "forge-ntt")]
-    {
-        for col in columns.iter_mut() {
-            unsafe {
-                ffi::cuda_circle_ntt_evaluate(
-                    col.as_mut_ptr(),
-                    cache.twiddles_ptr(),
-                    cache.circle_twids_ptr(),
-                    cache.layer_offsets().as_ptr(),
-                    cache.layer_sizes().as_ptr(),
-                    n_line_layers,
-                    n,
-                );
-            }
-        }
-        return;
+    unsafe {
+        ffi::cuda_circle_ntt_evaluate_batch_forge(
+            ptrs.as_ptr(),
+            cache.twiddles_ptr(),
+            cache.circle_twids_ptr(),
+            cache.layer_offsets().as_ptr(),
+            cache.layer_sizes().as_ptr(),
+            n_line_layers,
+            n,
+            n_cols,
+        );
     }
 
     #[cfg(not(feature = "forge-ntt"))]
     {
-        let n_cols = columns.len() as u32;
-        let ptrs: Vec<*mut u32> = columns.iter_mut().map(|c| c.as_mut_ptr()).collect();
         let d_ptrs = DeviceBuffer::from_host(&ptrs);
         unsafe {
             ffi::cuda_circle_ntt_evaluate_batch(
@@ -249,28 +245,25 @@ pub fn interpolate_batch(columns: &mut [DeviceBuffer<u32>], cache: &impl Inverse
     let n = 1u32 << log_n;
     let n_line_layers = if log_n > 0 { log_n - 1 } else { 0 };
 
+    let n_cols = columns.len() as u32;
+    let ptrs: Vec<*mut u32> = columns.iter_mut().map(|c| c.as_mut_ptr()).collect();
+
     #[cfg(feature = "forge-ntt")]
-    {
-        for col in columns.iter_mut() {
-            unsafe {
-                ffi::cuda_circle_ntt_interpolate(
-                    col.as_mut_ptr(),
-                    cache.itwiddles_ptr(),
-                    cache.circle_itwids_ptr(),
-                    cache.ilayer_offsets().as_ptr(),
-                    cache.ilayer_sizes().as_ptr(),
-                    n_line_layers,
-                    n,
-                );
-            }
-        }
-        return;
+    unsafe {
+        ffi::cuda_circle_ntt_interpolate_batch_forge(
+            ptrs.as_ptr(),
+            cache.itwiddles_ptr(),
+            cache.circle_itwids_ptr(),
+            cache.ilayer_offsets().as_ptr(),
+            cache.ilayer_sizes().as_ptr(),
+            n_line_layers,
+            n,
+            n_cols,
+        );
     }
 
     #[cfg(not(feature = "forge-ntt"))]
     {
-        let n_cols = columns.len() as u32;
-        let ptrs: Vec<*mut u32> = columns.iter_mut().map(|c| c.as_mut_ptr()).collect();
         let d_ptrs = DeviceBuffer::from_host(&ptrs);
         unsafe {
             ffi::cuda_circle_ntt_interpolate_batch(
