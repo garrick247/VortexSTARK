@@ -91,7 +91,7 @@ full call graph of a real contract interaction.
 ordering, L1 ZK blinding proof, L2 initial register state, L3 program hash,
 L4 U256InvModN. All findings fixed and retested.
 
-**Soundness:** 34-column trace, 35 transition constraints. 17+ tamper tests
+**Soundness:** 34-column trace, 35 transition constraints. 18 tamper tests
 (trace, quotient, FRI, LogUp sums, RC sums, memory table, program hash, PoW)
 all reject. Full ZK blinding on all 34 columns via `r · Z_H(x)`.
 
@@ -100,17 +100,27 @@ Proofs are submittable directly to Starknet's on-chain verifier.
 
 ## What's Not Yet
 
-- **Felt252 in dicts**: dict values are M31 today. Real Starknet contracts
-  store `felt252` — design plan is in `FELT252_DESIGN.md`, ~3–4 weeks + audit.
-  Option B (side table + pointer columns) recommended — 5–8% perf hit, no
-  pervasive trace changes, GAP-1 soundness argument extends cleanly.
+- **Felt252 in dicts**: AIR-level dict columns are M31; the 2026-04-23
+  Phase 2 work shipped a Blake2s-committed `dict_side_table` (pointer +
+  9 M31 limbs each for key/prev/new) plus a syscall-routed
+  `felt_overlay` so values from full-felt syscall data round-trip
+  bit-exact at 252 bits. Direct in-program dict writes that bypass the
+  syscall path still reduce mod M31 at the AIR boundary. See
+  `FELT252_DESIGN.md` for the full plan and current per-checkbox state;
+  Phase 3 (a targeted side-table tamper test + an end-to-end Cairo 1
+  contract test against `LegacyMap<felt252, felt252>`) and Phase 4
+  (external audit + deployment) remain.
 - **Cairo VM prove speed**: log_n=25 measures 198s (OODS is 40%, 80s). log_n=26 currently OOMs on 32 GB VRAM — the full 34-column eval-domain trace requires >32 GB. Super-linear scaling in OODS, phase3_quotient, and phase5_pow_decommit is the dominant issue. Profiler identifies top-3
   phases (`oods`, `ntt_blind_commit`, `phase2_logup_rc`) = 80% of prove time.
   Roadmap in `PERF_ROADMAP.md` projects 2–3× via kernel fusion, further 2–3×
   via algorithmic swaps (GrandProduct LogUp, barycentric OODS). Block cadence
   (~5s) reaches via proof aggregation or multi-GPU, not just kernel work.
-- **Full bitwise soundness**: inputs constrained < 2^15 today (rejects above);
-  31-bit needs bit-decomposition.
+- **Full bitwise soundness**: 32-bit inputs are sound today (M1 closure
+  2026-04-23). The verifier owns the authenticated `(x, y)` via
+  `bitwise_commitment` and recomputes the true `(x & y, x ^ y, x | y)`
+  natively, rejecting any mismatch — strictly stronger than the prior
+  algebraic C0/C1 constraint and lifts the 15-bit input restriction.
+  See AUDIT.md §M1.
 
 ## Why This Matters for Starknet
 
@@ -121,7 +131,7 @@ plugs directly into the existing stwo-cairo pipeline.
 
 Nethermind's `stwo-gpu` effort (189 commits, no published benchmarks or
 releases) is the only other GPU attempt. VortexSTARK ships with:
-- Passing test suite (356/356)
+- Passing test suite (392 lib + 35 integration; 3 #[ignore] for benchmark/live-RPC opt-in)
 - Real benchmarks from real measurements
 - Closed audit
 - On-chain-submittable proofs

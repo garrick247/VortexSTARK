@@ -1,11 +1,11 @@
 # Felt252-in-Dicts — Design Sketch
 
-Status: **scoping, not yet implemented**. This document enumerates the work
-required to lift VortexSTARK's `Felt252Dict` support from M31-only (the
-current limitation) to full 252-bit values, so that real Starknet contracts
-that store `felt252` values in dicts (almost all of them) can be proven.
+Status: **Phase 1 complete, Phase 2 ~90% complete (2026-04-26)**. The Felt252
+plumbing, side-table commitment, and Felt-overlay VM memory model have all
+landed; the AIR-level dict columns remain M31. See "Phased Implementation Plan"
+below for the per-checkbox state.
 
-## Current State (2026-04-22)
+## Original problem statement (2026-04-22)
 
 `src/cairo_air/trace.rs` defines the 34-column main trace:
 - Columns 0..31: Cairo VM registers, flags, operands, offsets
@@ -121,32 +121,81 @@ Go with **Option B (side table with pointers)**.
 
 ## Phased Implementation Plan
 
-**Phase 1 — Felt252 plumbing (1 week)**
-- [ ] `crate::felt252` module: `pub struct Felt252([u32; 9])` with `add`,
-      `sub`, `mul_mod_p`, `to_limbs`, `from_hex`
-- [ ] `SyscallState`: storage, caller, contract_address, etc. typed as `Felt252`
-- [ ] CASM loader: stop truncating values > u64; produce `Felt252` directly
+**Phase 1 — Felt252 plumbing (1 week)** — landed 2026-04-23
+- [x] `crate::felt252` module: `Felt252` is a transparent alias of
+      `cairo_air::stark252_field::Fp` with `from_u64`, `from_hex`,
+      `to/from_le_bytes`, `low_u64`, `try_to_u64`, `to_m31_limbs_9`. See
+      `src/felt252.rs`.
+- [x] `SyscallState`: `storage: HashMap<Felt252, Felt252>`,
+      `caller_address`, `contract_address`, `entry_point_selector`,
+      `SyscallEvent.keys/data`, `CrossContractCall.*`, `DeployedContract.*`,
+      `L1Message.*` — all widened. See `src/cairo_air/hints.rs`.
+- [x] CASM loader: produces `bytecode_felt: Vec<Felt252>` alongside the
+      truncated `bytecode: Vec<u64>`; `parse_hex_felt252` is lossless. See
+      `src/cairo_air/casm_loader.rs::parse_hex_felt252`.
 - [ ] `ProveError::Felt252Overflow` deprecated (no overflows to report)
+      — **kept**: bytecode entries that exceed u64 are still rejected at
+      `prover.rs:716-717`. Removing this would let truncation happen
+      silently, which is the bug Phase 1 was meant to prevent. The error
+      now signals "your program needs Phase 2 dict-side-table coverage,
+      not just Phase 1 plumbing"; an audit may rephrase it accordingly.
 
-**Phase 2 — Dict side table (1 week)**
-- [ ] `HintContext::dict_accesses` → `(step, Felt252, Felt252, Felt252)`
-- [ ] `dict_consistency.rs::verify_chain` on Felt252
-- [ ] Side-table construction + Merkle commit in `prover.rs`
-- [ ] Verifier: side-table reconstruction + LogUp bus check
-- [ ] Soundness note in `SOUNDNESS.md`
+**Phase 2 — Dict side table (1 week)** — landed 2026-04-23 except item #1
+- [~] `HintContext::dict_accesses` → `(step, Felt252, Felt252, Felt252)`:
+      **partial**. The original u64 quadruple log
+      (`dict_accesses: Vec<(usize, u64, u64, u64)>`) is preserved as the
+      AIR-authoritative log; a parallel
+      `dict_accesses_felt: Vec<(usize, Felt252, Felt252, Felt252)>` was
+      added for full-precision capture from syscall paths. The side-table
+      commit reads from `dict_accesses_felt` when populated, falling back
+      to `Felt252::from_u64(dict_accesses)` otherwise. Replacing the u64
+      log entirely would force every direct (non-syscall) dict write to
+      route through Felt252, which still reduces mod M31 at the AIR
+      boundary — i.e. a refactor with no soundness gain. Left as-is.
+- [x] `dict_consistency.rs::verify_chain` on Felt252:
+      `verify_chain_felt` in `src/cairo_air/dict_consistency.rs:194`.
+- [x] Side-table construction + Merkle commit in `prover.rs`:
+      `dict_side_table: Vec<[u32; 28]>` (pointer + 9 key limbs +
+      9 prev limbs + 9 new limbs) with `dict_side_table_commitment`
+      (Blake2s of flat u32 serialization). Mixed into channel right
+      after `dict_trace_commitment`, before `z_dict_link` is drawn —
+      see `src/cairo_air/prover.rs:1185, 3011-3012`.
+- [x] Verifier: side-table reconstruction + LogUp bus check:
+      `prover.rs:3304-3322` (canonical-limb encoding enforced
+      `< 2^28` per limb, side-table re-Blake2sed and compared to
+      committed root, low-31-bit projection cross-checked against the
+      Merkle-authenticated `dict_exec_data`).
+- [x] Soundness note in `SOUNDNESS.md`: see SOUNDNESS.md
+      "(PARTIALLY MITIGATED — Phase 2 in progress) Felt252 truncation"
+      and AUDIT.md "Dict memory bus link / R2 (2026-04-23)".
 
-**Phase 3 — Test + audit (1 week)**
-- [ ] Tamper tests: corrupt side-table row, corrupt pointer, wrong limb
-- [ ] End-to-end: prove `LegacyMap<felt252, felt252>` style contract with
-      non-M31 values; verify
-- [ ] External audit pass (likely needed — GAP-1 changes)
+**Phase 3 — Test + audit**
+- [ ] Tamper tests: corrupt side-table row, corrupt pointer, wrong limb.
+      **Partially covered**: existing dict-tamper tests
+      (`test_dict_logup_*` family) cover the dict-AIR side; the
+      side-table ↔ exec-trace link is exercised by the
+      "DoS / panic hardening (2026-04-23)" zero-commitment rejection in
+      AUDIT.md. A targeted "swap one limb in dict_side_table" tamper
+      test is the natural next step.
+- [ ] End-to-end: prove `LegacyMap<felt252, felt252>` style contract
+      with non-M31 values; verify. Requires a real Cairo 1 contract
+      that exercises the syscall→overlay→side-table path. The unit test
+      `test_dict_felt252_values_roundtrip` (per VortexSTARK status
+      memory) covers the prover-side path; an end-to-end Cairo
+      contract test is the real validation.
+- [ ] External audit pass — out of session scope.
 
 **Phase 4 — Deployment (as needed)**
-- [ ] Update README constraint coverage
+- [x] Update README constraint coverage — see "Remaining limitations"
+      and "Known remaining weak points" sections, refreshed 2026-04-26.
 - [ ] Update `STARKNET_POST.md` to remove the "felt252 dict" caveat
-- [ ] Bump version, tag release
+      (line 104 still references this design doc as 3–4 weeks of work;
+      update to reflect Phase 2 closure when Phase 3 audit lands).
+- [ ] Bump version, tag release — out of session scope.
 
-Total: 3–4 weeks with one engineer, plus ~1 week for audit.
+Original estimate: 3–4 weeks with one engineer, plus ~1 week for audit.
+Actual elapsed: Phase 1 + Phase 2 main body landed in a single session
+(2026-04-23). Phase 3 audit-side work and Phase 4 deployment remain.
 
 ## Known Interactions
 
