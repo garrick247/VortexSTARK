@@ -48,7 +48,7 @@ Cairo VM proving runs end-to-end through the GPU pipeline. The CLI emits `cairo-
 | Cairo VM log_n=22 | 4.2M steps | 5.0s | ~1s |
 | Cairo VM log_n=24 | 16.8M steps | 22.1s | ~3s |
 | Cairo VM log_n=25 | 33.5M steps | 80s | ~5s |
-| Cairo VM log_n=26 | 67M steps | OOM (needs >32 GB VRAM) | — |
+| Cairo VM log_n=26 | 67M steps | runs via chunked-slab quotient (commit `7a7b2b2`); wallclock TBD on native Linux | — |
 | Poseidon2 trace+NTT log_n=28 | 8.9M hashes | 1.92s | — |
 | Pedersen GPU batch | 1M hashes | 26.6ms | — |
 
@@ -110,7 +110,7 @@ Proofs are submittable directly to Starknet's on-chain verifier.
   Phase 3 (a targeted side-table tamper test + an end-to-end Cairo 1
   contract test against `LegacyMap<felt252, felt252>`) and Phase 4
   (external audit + deployment) remain.
-- **Cairo VM prove speed**: log_n=25 measures 198s (OODS is 40%, 80s). log_n=26 currently OOMs on 32 GB VRAM — the full 34-column eval-domain trace requires >32 GB. Super-linear scaling in OODS, phase3_quotient, and phase5_pow_decommit is the dominant issue. Profiler identifies top-3
+- **Cairo VM prove speed**: log_n=25 measures 198s (OODS is 40%, 80s). log_n=26 OOM is closed by the chunked-slab quotient kernel (commit `7a7b2b2`, 2026-04-26): phase2 stops keeping hc-natural GPU buffers when `keep_hc_resident=false`, phase3 streams slabs through `cuda_cairo_quotient_slab`, peak GPU ≈ 4 GB per chunk. Validated up through log_n=22 forced-slab on WSL2; log_n=26 wallclock pending native-Linux measurement. Super-linear scaling in OODS, phase3_quotient, and phase5_pow_decommit remains the dominant perf issue. Profiler identifies top-3
   phases (`oods`, `ntt_blind_commit`, `phase2_logup_rc`) = 80% of prove time.
   Roadmap in `PERF_ROADMAP.md` projects 2–3× via kernel fusion, further 2–3×
   via algorithmic swaps (GrandProduct LogUp, barycentric OODS). Block cadence

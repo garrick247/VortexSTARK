@@ -31,7 +31,7 @@ Default build, `BLOWUP_BITS=2`, 160-bit security, N_QUERIES=80, PoW=26 bits:
 | Cairo VM log_n=22 | 4.2M steps | 5.0s | ~1s |
 | Cairo VM log_n=24 | 16.8M steps | 22.1s | ~3s |
 | Cairo VM log_n=25 | 33.5M steps | 80s | ~5s |
-| Cairo VM log_n=26 | 67M steps | OOM (needs >32 GB VRAM) | — |
+| Cairo VM log_n=26 | 67M steps | runs via chunked-slab quotient kernel (commit `7a7b2b2`); requires ≥40 GB host RAM for the parallel `cn`/`hc` host copies. Native-Linux wallclock TBD — WSL2's 31 GB host ceiling caps in-house validation at log_n=22 | — |
 | Poseidon2 trace+NTT log_n=28 | 8.9M hashes | 1.92s | — |
 | RPO-M31 trace+NTT log_n=28 | 19.2M hashes | 5.51s | — |
 | Pedersen GPU batch | 1M hashes | 26.6ms | — |

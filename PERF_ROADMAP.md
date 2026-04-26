@@ -115,7 +115,7 @@ move to the architectural items above.
 | 22    |  4.2M rows  |  11.4s | 1× |
 | 24    | 16.8M rows  |  48.8s | 4.3× (expected 4×) |
 | 25    | 33.5M rows  |   198s | 17.4× (expected 8×) |
-| 26    | 67M rows    | **OOM** | — (needs >32 GB VRAM) |
+| 26    | 67M rows    | runs (slab) | wallclock TBD on native Linux — see below |
 
 The 8× jump at log_n=25 reveals **super-linear scaling in three phases** that
 were under-optimized in the 2026-04-22 push:
@@ -128,10 +128,16 @@ were under-optimized in the 2026-04-22 push:
 | phase2_logup_rc       |   3.4s   |   34.3s  | 10× |
 | ntt_blind_commit      |   3.8s   |   21.3s  | 5.6× |
 
-**log_n=26 OOM root cause:** the full 34-column eval-domain trace at
-log_n=26 needs `34 × 2^28 × 4B = 34 GB`, exceeding the 32 GB VRAM on an
-RTX 5090. Current pipeline loads it into pinned host memory as backup,
-which fails on Windows due to page-locked-memory limits.
+**log_n=26 OOM closed by chunked-slab quotient (commit `7a7b2b2`,
+2026-04-26):** the full 34-column eval-domain trace at log_n=26 needs
+`34 × 2^28 × 4B = 34 GB`, which exceeded the 32 GB VRAM on RTX 5090.
+The phase2 commits now skip GPU-resident hc-natural buffers when
+`keep_hc_resident=false`, and phase3 streams (chunk_n + blowup_step)-
+sized slabs through the `cuda_cairo_quotient_slab` kernel. Per-chunk
+GPU peak ≈ 4 GB (66 cols × 16M rows × 4B at n_chunks=16). Total host
+RAM at log_n=26: ~40 GB for parallel `cn`+`hc` copies of trace + 8
+side-data groups; fits on a 64 GB Linux-native host. WSL2's 31 GB
+ceiling caps in-house validation at log_n=22.
 
 ### Next perf targets
 
