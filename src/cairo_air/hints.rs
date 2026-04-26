@@ -1646,6 +1646,92 @@ mod tests {
     }
 
     #[test]
+    fn test_dict_round_trip_preserves_high_felt252() {
+        // Felt252-precision end-to-end through the hint executor:
+        // when a Cairo program writes a >u64 felt252 value into the dict
+        // entry cell via the syscall path (which uses `mem.set_felt`),
+        // `hint_dict_entry_update` reads it via `mem.get_felt` and pushes
+        // the full 252-bit value to `ctx.dict_accesses_felt` — the input
+        // to the prover's `dict_side_table` builder.
+        //
+        // This test pairs with `test_dict_felt252_values_roundtrip` in
+        // prover.rs (which manually populates `dict_accesses_felt` and
+        // proves end-to-end). Together they cover the full felt252
+        // pipeline: hint executor populates the felt log, prover
+        // packages it into the side table.
+        use crate::felt252::{Felt252, FeltExt};
+        let mut mem = Memory::new();
+        let mut ctx = HintContext::new();
+        let s = state(200, 200);
+
+        // Segment arena fixture for AllocFelt252Dict.
+        mem.set(10, 0); mem.set(11, 0);
+        mem.set(200, 10);
+        let alloc_h = make_hint("AllocFelt252Dict", serde_json::json!({
+            "segment_arena_ptr": {"Deref": {"register": "FP", "offset": 0}}
+        }));
+        run_hints(&vec![(0usize, vec![alloc_h])], 0, 0, &s, &mut mem, &mut ctx);
+
+        let dict_base = SEGMENT_BASE_DEFAULT;
+
+        // First DictEntryInit at the dict_base entry cell.
+        let init_h = make_hint("Felt252DictEntryInit", serde_json::json!({
+            "dict_ptr": {"Immediate": {"value": &format!("0x{dict_base:x}")}},
+            "key":      {"Immediate": {"value": "42"}}
+        }));
+        run_hints(&vec![(0usize, vec![init_h])], 0, 0, &s, &mut mem, &mut ctx);
+
+        // Simulate the program writing the dict entry: low-u64 path via
+        // mem.set, full-precision path via mem.set_felt for cells whose
+        // values exceed u64. The KEY is small (fits in u64); the
+        // NEW_VALUE is a real felt252 with non-trivial high limbs.
+        mem.set(dict_base + 0, 42);   // key: small
+        let high_value = Felt252 {
+            // 0xDEAD…CAFE in low_u64, 0x0123…CDEF in next limb,
+            // 0x0000…0001 in third limb — strictly > u64.
+            v: [0xDEADBEEF_CAFEBABE, 0x0123456789ABCDEF, 0x1, 0x0],
+        };
+        assert!(high_value.try_to_u64().is_none(),
+            "test value must exceed u64 to exercise the overlay path");
+        mem.set_felt(dict_base + 2, high_value);
+
+        // dict_ptr_ptr at fp+100 = address 300 holds dict_base.
+        mem.set(300, dict_base);
+        let update_h = make_hint("Felt252DictEntryUpdate", serde_json::json!({
+            "dict_ptr_ptr": {"register": "FP", "offset": 100}
+        }));
+        // run_hints(hints, pc, step, ...) — `step` is what shows up in
+        // `dict_accesses[i].0`. Register hint at PC 0 so the lookup hits.
+        run_hints(&vec![(0usize, vec![update_h])], 0, 7, &s, &mut mem, &mut ctx);
+
+        // (1) The u64 log carries the lossy low_u64 (M31-truncation-bound
+        // representation). This is what AIR-level columns see.
+        assert_eq!(ctx.dict_accesses.len(), 1, "one access logged");
+        let (step_u64, key_u64, prev_u64, new_u64) = ctx.dict_accesses[0];
+        assert_eq!(step_u64, 7);
+        assert_eq!(key_u64, 42);
+        assert_eq!(prev_u64, 0);
+        assert_eq!(new_u64, 0xDEADBEEF_CAFEBABE,
+            "u64 log must carry low_u64 of the felt252 new value");
+
+        // (2) The felt log carries the FULL 252-bit value via the
+        // overlay round-trip. This is what populates the prover's
+        // `dict_side_table` with high-limb data.
+        assert_eq!(ctx.dict_accesses_felt.len(), 1);
+        let (step_felt, key_felt, prev_felt, new_felt) = ctx.dict_accesses_felt[0];
+        assert_eq!(step_felt, 7);
+        assert_eq!(key_felt, Felt252::from_u64(42));
+        assert_eq!(prev_felt, Felt252::from_u64(0));
+        assert_eq!(new_felt, high_value,
+            "felt log must carry the full 252-bit value bit-exact, \
+             not the u64-truncated version");
+        assert_eq!(new_felt.v[1], 0x0123456789ABCDEF,
+            "limb 1 must round-trip via the felt overlay");
+        assert_eq!(new_felt.v[2], 0x1,
+            "limb 2 must round-trip via the felt overlay");
+    }
+
+    #[test]
     fn test_u256_inv_mod_n_invertible() {
         let mut mem = Memory::new();
         let s = state(100, 100);

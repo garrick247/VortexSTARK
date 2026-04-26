@@ -179,12 +179,27 @@ Go with **Option B (side table with pointers)**.
       `test_dict_side_table_tampered_pointer_rejected` (row pointer
       corruption + commitment rehash → downstream link rejection). All
       three pass on 2026-04-26.
-- [ ] End-to-end: prove `LegacyMap<felt252, felt252>` style contract
-      with non-M31 values; verify. Requires a real Cairo 1 contract
-      that exercises the syscall→overlay→side-table path. The unit test
-      `test_dict_felt252_values_roundtrip` (per VortexSTARK status
-      memory) covers the prover-side path; an end-to-end Cairo
-      contract test is the real validation.
+- [~] End-to-end: prove `LegacyMap<felt252, felt252>` style contract
+      with non-M31 values; verify. **Covered in two halves by
+      composition** (no single CASM file, but the union exercises
+      every link in the chain at full felt252 precision):
+      1. `test_dict_round_trip_preserves_high_felt252` (hints.rs)
+         drives the hint executor end-to-end with `Memory::set_felt`
+         populating a >u64 felt and `Felt252DictEntryUpdate` reading
+         it via `memory.get_felt`, asserting the full 252-bit value
+         lands in `ctx.dict_accesses_felt`.
+      2. `test_dict_felt252_values_roundtrip` (prover.rs) takes
+         pre-built (u64, felt) parallel access logs (the same shape
+         the hint executor produces) and runs them through
+         `cairo_prove_cached_with_columns` + `cairo_verify`,
+         asserting the side-table preserves high limbs and the
+         proof verifies.
+      Combined coverage: hint-executor path proven to populate the
+      felt log correctly + prover-packaging path proven to round-trip
+      the felt log through the side-table commitment + verifier check.
+      A monolithic CASM-file test would still be valuable as the
+      "real Cairo 1 contract" smoke test; that requires Scarb-
+      compiled bytecode and is the remaining bounded item.
 - [ ] External audit pass — out of session scope.
 
 **Phase 4 — Deployment (as needed)**

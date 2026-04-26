@@ -733,7 +733,7 @@ on same host; binary rebuilt from `147dd7f`.
 | sdict_interaction      |  1512.7ms |   480.1ms | −68.3%  |
 | phase5_pow_decommit    |   905.1ms |   804.6ms | −11.1%  |
 
-**Every phase faster. All lib tests still pass (now 393/393 passing + 2 microbench `#[ignore]`s; verified 2026-04-26). Proofs verify OK.**
+**Every phase faster. All lib tests still pass (now 394/394 passing + 2 microbench `#[ignore]`s; verified 2026-04-26). Proofs verify OK.**
 
 Dominant optimization pattern: single-threaded CPU loops building domain-point
 lookups or doing per-row QM31 arithmetic were starving the GPU. Switching to
