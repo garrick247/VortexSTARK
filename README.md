@@ -155,7 +155,7 @@ cargo run --release --bin gpu_bench     # pre-flight checks + per-section GPU te
 
 ## Tests
 
-395 lib + 35 integration = 430 total (428 pass, 3 marked `#[ignore]` for benchmark/live-RPC opt-in) covering: M31/CM31/QM31 field arithmetic, Circle NTT, Merkle tree (commit, auth paths, tiled, SoA4), FRI (fold, circle fold, deterministic), STARK prover + verifier (multiple sizes, tamper detection), Cairo VM (decoder, executor, Fibonacci, constraints, LogUp, range checks, instruction decomposition), Poseidon, Pedersen (Stark252 field, EC ops, GPU vs CPU), Bitwise (memory segment, trace generation, constraint verification, prove/verify round-trip, tamper detection, large-input bounds check), LogUp/RC soundness (memory table commitment, cancellation check, RC counts commitment), OODS quotient formula correctness, GPU constraint eval (bytecode VM, warp-cooperative), GPU leaf hashing (Blake2s, domain separation), CASM loader, Cairo hints (AllocSegment, AllocFelt252Dict, dict entry lifecycle, squash, U256InvModN with 7 comprehensive test vectors), Fiat-Shamir transcript ordering (12 commitment points), property tests (completeness, soundness, random mutations), cross-validation (reference VM comparison for 9 program types).
+395 lib + 35 integration = 430 total (428 pass, 3 marked `#[ignore]` for benchmark/live-RPC opt-in) covering: M31/CM31/QM31 field arithmetic, Circle NTT, Merkle tree (commit, auth paths, tiled, SoA4), FRI (fold, circle fold, deterministic), STARK prover + verifier (multiple sizes, tamper detection), Cairo VM (decoder, executor, Fibonacci, constraints, LogUp, range checks, instruction decomposition), Poseidon, Pedersen (Stark252 field, EC ops, GPU vs CPU), Bitwise (memory segment, trace generation, verifier native recompute against Fiat-Shamir-bound (x, y), prove/verify round-trip, tamper detection, 32-bit input acceptance, forged-row rejection), LogUp/RC soundness (memory table commitment, cancellation check, RC counts commitment), OODS quotient formula correctness, GPU constraint eval (bytecode VM, warp-cooperative), GPU leaf hashing (Blake2s, domain separation), CASM loader, Cairo hints (AllocSegment, AllocFelt252Dict, dict entry lifecycle, squash, U256InvModN with 7 comprehensive test vectors), Fiat-Shamir transcript ordering (12 commitment points), property tests (completeness, soundness, random mutations), cross-validation (reference VM comparison for 9 program types).
 
 ## Break This System
 
@@ -163,9 +163,9 @@ If you can craft a malformed trace that the verifier accepts, that is a real bug
 
 ### Known remaining weak points
 
-- **Felt252 arithmetic**: values wider than 63 bits are truncated; M31 wrap-around replaces Stark252 arithmetic for overflowing programs
+- **Felt252 arithmetic**: bytecode values wider than u64 are rejected with `Felt252Overflow`; values in (M31, u64] silently reduce mod M31 inside AIR trace columns. M31 wrap-around replaces Stark252 arithmetic for any value above 2^31 − 1 that flows through the trace
 - **Cross-contract execution**: `CallContract` and `LibraryCall` execute registered callees in-process (`HintContext::register_contract`). Unregistered targets return empty retdata. External contract resolution (fetching bytecode from Starknet RPC at call time) is not automatic.
-- **Felt252 dict values**: dict values are M31 elements; programs that store full Stark252 field elements in dicts are not supported
+- **Felt252 dict values**: AIR-level dict columns are M31. The 2026-04-23 Phase 2 work added a Blake2s-committed `dict_side_table` (pointer + 9 M31 limbs each for key/prev/new) and a `felt_overlay` for syscall-routed dict writes, so values that originate from full-felt syscall data round-trip bit-exact at 252 bits via the side table. Direct in-program dict writes that bypass the syscall path still reduce mod M31 at the AIR boundary
 
 ### Expected to hold (guarantees today)
 
