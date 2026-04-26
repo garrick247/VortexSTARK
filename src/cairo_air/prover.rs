@@ -5499,6 +5499,46 @@ mod tests {
         println!();
     }
 
+    /// Stress test for the chunked-slab quotient dispatcher. Run with
+    /// `VORTEXSTARK_FORCE_HOST_HC=1 cargo test --release ...
+    /// cairo_prove_slab_dispatch_stress -- --ignored --nocapture`.
+    ///
+    /// At log_n=18 with FORCE_HOST_HC=1, the slab path runs even though
+    /// keep_hc_resident's heuristic would normally pick the resident
+    /// path. This validates that the dispatcher produces a verifying
+    /// proof at production scale (not just at the log_n=5/6 sizes the
+    /// regular suite covers).
+    ///
+    /// Without FORCE_HOST_HC, this also runs cleanly via the resident
+    /// path — useful as a sanity check that the test setup itself is
+    /// correct.
+    #[test]
+    #[ignore]
+    fn cairo_prove_slab_dispatch_stress() {
+        use std::time::Instant;
+        ffi::init_memory_pool();
+        // log_n configurable via env var so the same test exercises
+        // multiple sizes (log_n=18 = 1.5s, log_n=22 = ~5s, log_n=24 = ~22s).
+        // Default: log_n=18 — fast enough to run as a CI smoke test.
+        let log_n: u32 = std::env::var("VORTEXSTARK_STRESS_LOG_N")
+            .ok().and_then(|v| v.parse().ok()).unwrap_or(18);
+        let n = 1usize << log_n;
+        let program = build_fib_program(n);
+
+        let force = std::env::var("VORTEXSTARK_FORCE_HOST_HC")
+            .map(|v| v == "1" || v == "true").unwrap_or(false);
+        let mode = if force { "FORCED slab" } else { "default (resident)" };
+
+        let t0 = Instant::now();
+        let proof = cairo_prove(&program, n, log_n);
+        let elapsed = t0.elapsed().as_secs_f64();
+        cairo_verify(&proof)
+            .expect("proof must verify on the chosen dispatch path");
+        println!("\n==== slab-dispatch stress test @ log_n={log_n} ({mode}) ====");
+        println!("  prove + verify: {elapsed:.4}s");
+        println!();
+    }
+
     #[test]
     fn test_cairo_prove_verify_tampered_commitment() {
         ffi::init_memory_pool();
