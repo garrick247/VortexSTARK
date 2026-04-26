@@ -2,6 +2,10 @@
 
 GPU-native Circle STARK prover with end-to-end proof generation and verification on NVIDIA Blackwell (RTX 5090) and Ada Lovelace (RTX 4090). Rust + CUDA.
 
+To our knowledge, the only public Circle STARK prover with a real GPU backend. The upstream `stwo` reference implementation (Starkware) runs on CPU; VortexSTARK is a from-scratch CUDA implementation of the same construction — trace generation, NTT, Merkle commitment, LogUp interaction, FRI, and proof-of-work all run kernel-side with no host round-trips on the hot path.
+
+Source-available under [BSL 1.1](LICENSE), converts to Apache 2.0 on **2029-03-20**. Non-production use permitted today; commercial licensing available before the conversion date — contact garrick.wagner@gmail.com.
+
 ## Status
 
 ### End-to-end proven and verified on hardware
@@ -202,6 +206,10 @@ These should **not** break. If they do, that's a real soundness bug:
 | `test_tamper_ec_trace` | Corrupt EC trace commitment | REJECTED |
 | `test_soundness_oods_quotient_tamper` | Corrupt OODS quotient decommitment value | REJECTED |
 
+## Author
+
+Garrick Wagner — independent GPU systems work. Contact: garrick.wagner@gmail.com.
+
 ## License
 
-Business Source License 1.1 ([LICENSE](LICENSE)). Non-production use permitted. Converts to Apache License 2.0 on 2029-03-20. Contact for commercial licensing.
+Business Source License 1.1 ([LICENSE](LICENSE)). Non-production use permitted. Converts to Apache License 2.0 on 2029-03-20. Commercial licensing: garrick.wagner@gmail.com.
