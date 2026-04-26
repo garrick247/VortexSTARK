@@ -82,9 +82,9 @@ __global__ void gather_u256(forge_span_u32_t src __attribute__((unused)), forge_
 __global__ void gather_u32(forge_span_u32_t src __attribute__((unused)), forge_span_u32_t idx __attribute__((unused)), forge_span_u32_t dst __attribute__((unused)), uint64_t n __attribute__((unused)), uint64_t src_len __attribute__((unused))) {
   uint64_t i __attribute__((unused)) = ((blockIdx_x * blockDim_x) + threadIdx_x);
   if ((i < n)) {
-    uint32_t j __attribute__((unused)) = idx.data[i];
+    uint32_t j __attribute__((unused)) = __ldg((const uint32_t*)&idx.data[i]);
     if ((((uint64_t)j) < src_len)) {
-      dst.data[i] = src.data[((uint64_t)j)];
+      dst.data[i] = __ldg((const uint32_t*)&src.data[((uint64_t)j)]);
 
     }
 
@@ -94,19 +94,19 @@ __global__ void gather_u32(forge_span_u32_t src __attribute__((unused)), forge_s
 __global__ void gather_u256(forge_span_u32_t src __attribute__((unused)), forge_span_u32_t idx __attribute__((unused)), forge_span_u32_t dst __attribute__((unused)), uint64_t n __attribute__((unused)), uint64_t src_len __attribute__((unused))) {
   uint64_t i __attribute__((unused)) = ((blockIdx_x * blockDim_x) + threadIdx_x);
   if ((i < n)) {
-    uint32_t j __attribute__((unused)) = idx.data[i];
+    uint32_t j __attribute__((unused)) = __ldg((const uint32_t*)&idx.data[i]);
     uint64_t src_off __attribute__((unused)) = (((uint64_t)j) * 8ULL);
     uint64_t dst_off __attribute__((unused)) = (i * 8ULL);
     if (((src_off + 7ULL) < src_len)) {
       if (((dst_off + 7ULL) < dst.len)) {
-        dst.data[dst_off] = src.data[src_off];
-        dst.data[(dst_off + 1ULL)] = src.data[(src_off + 1ULL)];
-        dst.data[(dst_off + 2ULL)] = src.data[(src_off + 2ULL)];
-        dst.data[(dst_off + 3ULL)] = src.data[(src_off + 3ULL)];
-        dst.data[(dst_off + 4ULL)] = src.data[(src_off + 4ULL)];
-        dst.data[(dst_off + 5ULL)] = src.data[(src_off + 5ULL)];
-        dst.data[(dst_off + 6ULL)] = src.data[(src_off + 6ULL)];
-        dst.data[(dst_off + 7ULL)] = src.data[(src_off + 7ULL)];
+        dst.data[dst_off] = __ldg((const uint32_t*)&src.data[src_off]);
+        dst.data[(dst_off + 1ULL)] = __ldg((const uint32_t*)&src.data[(src_off + 1ULL)]);
+        dst.data[(dst_off + 2ULL)] = __ldg((const uint32_t*)&src.data[(src_off + 2ULL)]);
+        dst.data[(dst_off + 3ULL)] = __ldg((const uint32_t*)&src.data[(src_off + 3ULL)]);
+        dst.data[(dst_off + 4ULL)] = __ldg((const uint32_t*)&src.data[(src_off + 4ULL)]);
+        dst.data[(dst_off + 5ULL)] = __ldg((const uint32_t*)&src.data[(src_off + 5ULL)]);
+        dst.data[(dst_off + 6ULL)] = __ldg((const uint32_t*)&src.data[(src_off + 6ULL)]);
+        dst.data[(dst_off + 7ULL)] = __ldg((const uint32_t*)&src.data[(src_off + 7ULL)]);
 
       }
 

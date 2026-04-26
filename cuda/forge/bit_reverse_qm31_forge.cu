@@ -102,10 +102,10 @@ __global__ void bit_reverse_qm31(forge_span_u32_t in_buf __attribute__((unused))
     uint64_t dst_off __attribute__((unused)) = (((uint64_t)j) * 4ULL);
     if (((src_off + 3ULL) < in_buf.len)) {
       if (((dst_off + 3ULL) < out_buf.len)) {
-        out_buf.data[dst_off] = in_buf.data[src_off];
-        out_buf.data[(dst_off + 1ULL)] = in_buf.data[(src_off + 1ULL)];
-        out_buf.data[(dst_off + 2ULL)] = in_buf.data[(src_off + 2ULL)];
-        out_buf.data[(dst_off + 3ULL)] = in_buf.data[(src_off + 3ULL)];
+        out_buf.data[dst_off] = __ldg((const uint32_t*)&in_buf.data[src_off]);
+        out_buf.data[(dst_off + 1ULL)] = __ldg((const uint32_t*)&in_buf.data[(src_off + 1ULL)]);
+        out_buf.data[(dst_off + 2ULL)] = __ldg((const uint32_t*)&in_buf.data[(src_off + 2ULL)]);
+        out_buf.data[(dst_off + 3ULL)] = __ldg((const uint32_t*)&in_buf.data[(src_off + 3ULL)]);
 
       }
 

@@ -157,7 +157,7 @@ static __device__ __forceinline__ uint32_t reduce_word(uint32_t v __attribute__(
 __global__ void merkle_hash_leaves_single(forge_span_u32_t column __attribute__((unused)), forge_span_u32_t hashes __attribute__((unused)), uint64_t n_leaves __attribute__((unused))) {
   uint64_t leaf __attribute__((unused)) = ((blockIdx_x * blockDim_x) + threadIdx_x);
   if ((leaf < n_leaves)) {
-    uint32_t m0 __attribute__((unused)) = column.data[leaf];
+    uint32_t m0 __attribute__((unused)) = __ldg((const uint32_t*)&column.data[leaf]);
     uint32_t m1 __attribute__((unused)) = 0ULL;
     uint32_t m2 __attribute__((unused)) = 0ULL;
     uint32_t m3 __attribute__((unused)) = 0ULL;
@@ -784,10 +784,10 @@ __global__ void merkle_hash_leaves_single(forge_span_u32_t column __attribute__(
 __global__ void merkle_hash_leaves_quad(forge_span_u32_t c0 __attribute__((unused)), forge_span_u32_t c1 __attribute__((unused)), forge_span_u32_t c2 __attribute__((unused)), forge_span_u32_t c3 __attribute__((unused)), forge_span_u32_t hashes __attribute__((unused)), uint64_t n_leaves __attribute__((unused))) {
   uint64_t leaf __attribute__((unused)) = ((blockIdx_x * blockDim_x) + threadIdx_x);
   if ((leaf < n_leaves)) {
-    uint32_t m0 __attribute__((unused)) = c0.data[leaf];
-    uint32_t m1 __attribute__((unused)) = c1.data[leaf];
-    uint32_t m2 __attribute__((unused)) = c2.data[leaf];
-    uint32_t m3 __attribute__((unused)) = c3.data[leaf];
+    uint32_t m0 __attribute__((unused)) = __ldg((const uint32_t*)&c0.data[leaf]);
+    uint32_t m1 __attribute__((unused)) = __ldg((const uint32_t*)&c1.data[leaf]);
+    uint32_t m2 __attribute__((unused)) = __ldg((const uint32_t*)&c2.data[leaf]);
+    uint32_t m3 __attribute__((unused)) = __ldg((const uint32_t*)&c3.data[leaf]);
     uint32_t m4 __attribute__((unused)) = 0ULL;
     uint32_t m5 __attribute__((unused)) = 0ULL;
     uint32_t m6 __attribute__((unused)) = 0ULL;

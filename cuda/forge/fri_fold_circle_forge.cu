@@ -232,19 +232,19 @@ __global__ void fold_circle_into_line_soa(forge_span_u32_t dst0 __attribute__((u
                 if ((i < dst1.len)) {
                   if ((i < dst2.len)) {
                     if ((i < dst3.len)) {
-                      uint32_t f0_a_re __attribute__((unused)) = reduce_word(src0.data[idx0]);
-                      uint32_t f0_a_im __attribute__((unused)) = reduce_word(src1.data[idx0]);
-                      uint32_t f0_b_re __attribute__((unused)) = reduce_word(src2.data[idx0]);
-                      uint32_t f0_b_im __attribute__((unused)) = reduce_word(src3.data[idx0]);
-                      uint32_t f1_a_re __attribute__((unused)) = reduce_word(src0.data[idx1]);
-                      uint32_t f1_a_im __attribute__((unused)) = reduce_word(src1.data[idx1]);
-                      uint32_t f1_b_re __attribute__((unused)) = reduce_word(src2.data[idx1]);
-                      uint32_t f1_b_im __attribute__((unused)) = reduce_word(src3.data[idx1]);
-                      uint32_t tw __attribute__((unused)) = reduce_word(twiddles.data[i]);
-                      uint32_t p_a_re __attribute__((unused)) = reduce_word(dst0.data[i]);
-                      uint32_t p_a_im __attribute__((unused)) = reduce_word(dst1.data[i]);
-                      uint32_t p_b_re __attribute__((unused)) = reduce_word(dst2.data[i]);
-                      uint32_t p_b_im __attribute__((unused)) = reduce_word(dst3.data[i]);
+                      uint32_t f0_a_re __attribute__((unused)) = reduce_word(__ldg((const uint32_t*)&src0.data[idx0]));
+                      uint32_t f0_a_im __attribute__((unused)) = reduce_word(__ldg((const uint32_t*)&src1.data[idx0]));
+                      uint32_t f0_b_re __attribute__((unused)) = reduce_word(__ldg((const uint32_t*)&src2.data[idx0]));
+                      uint32_t f0_b_im __attribute__((unused)) = reduce_word(__ldg((const uint32_t*)&src3.data[idx0]));
+                      uint32_t f1_a_re __attribute__((unused)) = reduce_word(__ldg((const uint32_t*)&src0.data[idx1]));
+                      uint32_t f1_a_im __attribute__((unused)) = reduce_word(__ldg((const uint32_t*)&src1.data[idx1]));
+                      uint32_t f1_b_re __attribute__((unused)) = reduce_word(__ldg((const uint32_t*)&src2.data[idx1]));
+                      uint32_t f1_b_im __attribute__((unused)) = reduce_word(__ldg((const uint32_t*)&src3.data[idx1]));
+                      uint32_t tw __attribute__((unused)) = reduce_word(__ldg((const uint32_t*)&twiddles.data[i]));
+                      uint32_t p_a_re __attribute__((unused)) = reduce_word(__ldg((const uint32_t*)&dst0.data[i]));
+                      uint32_t p_a_im __attribute__((unused)) = reduce_word(__ldg((const uint32_t*)&dst1.data[i]));
+                      uint32_t p_b_re __attribute__((unused)) = reduce_word(__ldg((const uint32_t*)&dst2.data[i]));
+                      uint32_t p_b_im __attribute__((unused)) = reduce_word(__ldg((const uint32_t*)&dst3.data[i]));
                       uint32_t sum_a_re __attribute__((unused)) = qm31_add_re_re(f0_a_re, f1_a_re);
                       uint32_t sum_a_im __attribute__((unused)) = qm31_add_re_im(f0_a_im, f1_a_im);
                       uint32_t sum_b_re __attribute__((unused)) = qm31_add_im_re(f0_b_re, f1_b_re);

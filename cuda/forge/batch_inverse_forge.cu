@@ -124,14 +124,14 @@ __global__ void batch_inverse_m31(forge_span_u32_t input __attribute__((unused))
     uint64_t count __attribute__((unused)) = (end - start);
     uint32_t prefix[64] __attribute__((unused)) = { 0 };
     if ((start < input.len)) {
-      prefix[0ULL] = input.data[start];
+      prefix[0ULL] = __ldg((const uint32_t*)&input.data[start]);
 
     }
     uint64_t i __attribute__((unused)) = 1ULL;
     {
       while ((i < count)) {
         if (((start + i) < input.len)) {
-          uint32_t val __attribute__((unused)) = input.data[(start + i)];
+          uint32_t val __attribute__((unused)) = __ldg((const uint32_t*)&input.data[(start + i)]);
           uint32_t prev __attribute__((unused)) = prefix[(i - 1ULL)];
           if ((val == 0ULL)) {
             prefix[i] = prev;
@@ -177,7 +177,7 @@ __global__ void batch_inverse_m31(forge_span_u32_t input __attribute__((unused))
         uint64_t i2 __attribute__((unused)) = (k - 1ULL);
         if (((start + i2) < input.len)) {
           if (((start + i2) < output.len)) {
-            uint32_t val __attribute__((unused)) = input.data[(start + i2)];
+            uint32_t val __attribute__((unused)) = __ldg((const uint32_t*)&input.data[(start + i2)]);
             if ((val == 0ULL)) {
               output.data[(start + i2)] = 0ULL;
 
@@ -208,7 +208,7 @@ __global__ void batch_inverse_m31(forge_span_u32_t input __attribute__((unused))
     if ((start < output.len)) {
       uint32_t v0;
       if ((start < input.len)) {
-        v0 = input.data[start];
+        v0 = __ldg((const uint32_t*)&input.data[start]);
       } else {
         v0 = 0ULL;
       }

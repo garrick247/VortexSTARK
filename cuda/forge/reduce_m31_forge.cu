@@ -95,7 +95,7 @@ static __host__ __device__ __forceinline__ uint32_t reduce_word(uint32_t v __att
 __global__ void reduce_words_to_m31(forge_span_u32_t data __attribute__((unused)), uint64_t n_words __attribute__((unused))) {
   uint64_t tid __attribute__((unused)) = ((blockIdx_x * blockDim_x) + threadIdx_x);
   if ((tid < n_words)) {
-    uint32_t v __attribute__((unused)) = data.data[tid];
+    uint32_t v __attribute__((unused)) = __ldg((const uint32_t*)&data.data[tid]);
     data.data[tid] = reduce_word(v);
 
   }

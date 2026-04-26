@@ -146,9 +146,9 @@ __global__ void circle_ntt_batch_layer_forward(forge_span_span_u32_t columns __a
       if ((idx0 < col.len)) {
         if ((idx1 < col.len)) {
           if ((h < twiddles.len)) {
-            uint32_t v0 __attribute__((unused)) = reduce_word(col.data[idx0]);
-            uint32_t v1 __attribute__((unused)) = reduce_word(col.data[idx1]);
-            uint32_t t __attribute__((unused)) = reduce_word(twiddles.data[h]);
+            uint32_t v0 __attribute__((unused)) = reduce_word(__ldg((const uint32_t*)&col.data[idx0]));
+            uint32_t v1 __attribute__((unused)) = reduce_word(__ldg((const uint32_t*)&col.data[idx1]));
+            uint32_t t __attribute__((unused)) = reduce_word(__ldg((const uint32_t*)&twiddles.data[h]));
             uint32_t tmp __attribute__((unused)) = m31_mul(v1, t);
             col.data[idx0] = m31_add(v0, tmp);
             col.data[idx1] = m31_sub(v0, tmp);
@@ -180,9 +180,9 @@ __global__ void circle_ntt_batch_layer_inverse(forge_span_span_u32_t columns __a
       if ((idx0 < col.len)) {
         if ((idx1 < col.len)) {
           if ((h < twiddles.len)) {
-            uint32_t v0 __attribute__((unused)) = reduce_word(col.data[idx0]);
-            uint32_t v1 __attribute__((unused)) = reduce_word(col.data[idx1]);
-            uint32_t t __attribute__((unused)) = reduce_word(twiddles.data[h]);
+            uint32_t v0 __attribute__((unused)) = reduce_word(__ldg((const uint32_t*)&col.data[idx0]));
+            uint32_t v1 __attribute__((unused)) = reduce_word(__ldg((const uint32_t*)&col.data[idx1]));
+            uint32_t t __attribute__((unused)) = reduce_word(__ldg((const uint32_t*)&twiddles.data[h]));
             uint32_t diff __attribute__((unused)) = m31_sub(v0, v1);
             col.data[idx0] = m31_add(v0, v1);
             col.data[idx1] = m31_mul(diff, t);
@@ -207,7 +207,7 @@ __global__ void m31_batch_scale(forge_span_span_u32_t columns __attribute__((unu
     if ((col_idx < columns.len)) {
       forge_span_u32_t col __attribute__((unused)) = columns.data[col_idx];
       if ((elem_idx < col.len)) {
-        uint32_t v __attribute__((unused)) = reduce_word(col.data[elem_idx]);
+        uint32_t v __attribute__((unused)) = reduce_word(__ldg((const uint32_t*)&col.data[elem_idx]));
         col.data[elem_idx] = m31_mul(v, scale);
 
       }

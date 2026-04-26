@@ -139,9 +139,9 @@ __global__ void circle_ntt_layer_forward(forge_span_u32_t data __attribute__((un
     if ((idx0 < data.len)) {
       if ((idx1 < data.len)) {
         if ((h < twiddles.len)) {
-          uint32_t v0 __attribute__((unused)) = reduce_word(data.data[idx0]);
-          uint32_t v1 __attribute__((unused)) = reduce_word(data.data[idx1]);
-          uint32_t t __attribute__((unused)) = reduce_word(twiddles.data[h]);
+          uint32_t v0 __attribute__((unused)) = reduce_word(__ldg((const uint32_t*)&data.data[idx0]));
+          uint32_t v1 __attribute__((unused)) = reduce_word(__ldg((const uint32_t*)&data.data[idx1]));
+          uint32_t t __attribute__((unused)) = reduce_word(__ldg((const uint32_t*)&twiddles.data[h]));
           uint32_t tmp __attribute__((unused)) = m31_mul(v1, t);
           data.data[idx0] = m31_add(v0, tmp);
           data.data[idx1] = m31_sub(v0, tmp);
@@ -166,9 +166,9 @@ __global__ void circle_ntt_layer_inverse(forge_span_u32_t data __attribute__((un
     if ((idx0 < data.len)) {
       if ((idx1 < data.len)) {
         if ((h < twiddles.len)) {
-          uint32_t v0 __attribute__((unused)) = reduce_word(data.data[idx0]);
-          uint32_t v1 __attribute__((unused)) = reduce_word(data.data[idx1]);
-          uint32_t t __attribute__((unused)) = reduce_word(twiddles.data[h]);
+          uint32_t v0 __attribute__((unused)) = reduce_word(__ldg((const uint32_t*)&data.data[idx0]));
+          uint32_t v1 __attribute__((unused)) = reduce_word(__ldg((const uint32_t*)&data.data[idx1]));
+          uint32_t t __attribute__((unused)) = reduce_word(__ldg((const uint32_t*)&twiddles.data[h]));
           uint32_t diff __attribute__((unused)) = m31_sub(v0, v1);
           data.data[idx0] = m31_add(v0, v1);
           data.data[idx1] = m31_mul(diff, t);
