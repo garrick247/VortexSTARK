@@ -2083,16 +2083,21 @@ fn cairo_prove_cached_with_columns(
         drop(d_u1_hc); drop(d_u2_hc);
 
         let blowup_step: u32 = 1u32 << crate::prover::BLOWUP_BITS;
-        // Choose n_chunks such that per-chunk slab GPU footprint stays
-        // well under the budget. At log_n<=24, eval_size <= 64M; one chunk
-        // with wrap-buffer is ~4% extra and acceptable. At log_n=25,
-        // n_chunks=8 gives ~16M rows/chunk. At log_n=26, n_chunks=16.
+        // Choose n_chunks targeting ~4M-16M rows per chunk. Smaller
+        // chunks let the wrap-extended last-chunk allocation stay
+        // proportionally tiny and keep the per-chunk slab GPU footprint
+        // well under the 32 GB budget at log_n=26. Empirical: n_chunks=1
+        // at log_n=22 had a ~5x slowdown vs the resident path, dominated
+        // by a single 4 GB H2D burst before the kernel. n_chunks=4
+        // splits the burst.
         let n_chunks: u32 = if (eval_size as u64) >= (1u64 << 28) {
             16
-        } else if (eval_size as u64) >= (1u64 << 27) {
-            8
         } else if (eval_size as u64) >= (1u64 << 26) {
+            8
+        } else if (eval_size as u64) >= (1u64 << 24) {
             4
+        } else if (eval_size as u64) >= (1u64 << 22) {
+            2
         } else {
             1
         };
