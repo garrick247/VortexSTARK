@@ -160,3 +160,53 @@ VORTEXSTARK_PROFILE=1 ./target/release/stark_cli prove-file \
 ```
 
 Data in this file reflects `9b365f2 .. 147dd7f` on `main`.
+
+## CHECKPOINT: FORGE migration sweep substantially complete (2026-04-27)
+
+After two days of pilot work, the FORGE-emitted kernel surface in
+production VortexSTARK is now 9 features wide:
+
+| Feature | Default | Source | Obligations |
+|---|---|---|---|
+| forge-ntt | **on** | pre-existing | 138 |
+| forge-ntt-batch | **on** | sweep | reuses ntt body |
+| forge-fri | **on** | pre-existing | 193 + 237 |
+| forge-bit-reverse | off | sweep | 12 |
+| forge-gather | off | sweep | 20 |
+| forge-blake2s | off | pre-existing | 145 |
+| forge-permute | off | new pilot | 9 |
+| forge-barycentric | off | new pilot | 197 |
+| forge-grind | off | new pilot | 22 |
+
+**Total user-supplied `assume()` calls across all 9 features: 0.**
+Every fact is SMT-discharged.  Three pilots (permute, barycentric,
+grind) were written from scratch this sweep covering the M31 warp-
+tree-reduce + Blake2s PoW idioms.
+
+Default-on subset is the proven-perf-positive three (5x microbench
+on ntt at n=2^20, 7.8x on fri at half_n=2^19).  The remaining six
+features each pass 394/394 individually combined with the default-
+three but cannot all coexist due to a multi-translation-unit
+codegen interaction (suspected nvcc LTO with `static __device__
+__forceinline__` helpers across multiple FORGE-emitted .cu files).
+Tracked in commit `9f74c06` and the migration memory note.
+Workaround: opt in to one of the parity-tested combos:
+`--features forge-bit-reverse,forge-gather,forge-blake2s` or
+`--features forge-permute,forge-barycentric,forge-grind`.
+
+End-to-end bench at log_n=18 (RTX 5090 / WSL2 / driver 595.79):
+parity wallclock with hand-written.  The microbench wins are
+expected to surface at log_n ≥ 24 where NTT/FRI dominate the phase
+budget; clean measurement environment is the Linux-native CI
+runner with pool-async cudaMallocAsync enabled.
+
+## Next perf targets (post-migration)
+
+1. **Larger log_n bench on Linux native** — measure forge-ntt /
+   forge-fri end-to-end speedups at log_n=24+ where Amdahl's law
+   stops capping the wins.
+2. **Resolve the multi-feature codegen conflict** so all 9 forge
+   paths can default-on. Likely needs a forge-side change to emit
+   anonymous-namespace wrappers per kernel.
+3. **OODS phase** (40% of log_n=25 wallclock) — same target as the
+   pre-migration roadmap above; FORGE migration didn't touch this.
