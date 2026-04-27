@@ -1,7 +1,7 @@
 //! Benchmark: CudaBackend vs CpuBackend on stwo operations.
 
 use std::time::Instant;
-use stwo::prover::backend::{ColumnOps, CpuBackend, Column};
+use stwo::prover::backend::{ColumnOps, CpuBackend};
 use stwo::core::fields::m31::{BaseField, M31};
 use stwo::core::poly::circle::CanonicCoset;
 use stwo::prover::poly::circle::{CircleCoefficients, PolyOps};

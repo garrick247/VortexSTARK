@@ -16,8 +16,9 @@ use stwo::core::fields::qm31::SecureField;
 use stwo::core::pcs::quotients::{column_line_coeffs, ColumnSampleBatch};
 use stwo::core::poly::circle::CanonicCoset;
 use stwo::core::utils::bit_reverse_index;
-use stwo::prover::backend::Column;
+use stwo::prover::backend::{Column, CpuBackend};
 use stwo::prover::poly::circle::{CircleEvaluation, SecureEvaluation};
+use stwo::prover::poly::twiddles::TwiddleTree;
 use stwo::prover::poly::BitReversedOrder;
 use stwo::prover::secure_column::SecureColumnByCoords;
 use stwo::prover::{AccumulatedNumerators, QuotientOps};
@@ -36,10 +37,49 @@ impl QuotientOps for CudaBackend {
         columns: &[&CircleEvaluation<Self, BaseField, BitReversedOrder>],
         sample_batches: &[ColumnSampleBatch],
         accumulated_numerators_vec: &mut Vec<AccumulatedNumerators<Self>>,
+        log_blowup_factor: u32,
     ) {
         let _span =
             span!(Level::INFO, "GPU accumulate_numerators", n_batches = sample_batches.len())
                 .entered();
+
+        // Upstream stwo now accumulates over only the first
+        // `column_size >> log_blowup_factor` subdomain rows (bit-reversed).
+        // Our existing GPU kernel still expects to accumulate over the
+        // FULL evaluation domain. Until the kernels are reworked to
+        // operate on a subdomain prefix, fall back to CpuBackend for
+        // correctness — matches the simd backend's small-size fallback.
+        if log_blowup_factor != 0 {
+            let cpu_evals: Vec<CircleEvaluation<CpuBackend, BaseField, BitReversedOrder>> =
+                columns
+                    .iter()
+                    .map(|c| CircleEvaluation::new(c.domain, c.values.to_cpu()))
+                    .collect();
+            let cpu_column_refs: Vec<&CircleEvaluation<CpuBackend, BaseField, BitReversedOrder>> =
+                cpu_evals.iter().collect();
+            let mut cpu_acc: Vec<AccumulatedNumerators<CpuBackend>> = vec![];
+            CpuBackend::accumulate_numerators(
+                &cpu_column_refs,
+                sample_batches,
+                &mut cpu_acc,
+                log_blowup_factor,
+            );
+            use super::column::CudaColumn;
+            for acc in cpu_acc {
+                let gpu_coords = SecureColumnByCoords {
+                    columns: acc
+                        .partial_numerators_acc
+                        .columns
+                        .map(|col| col.into_iter().collect::<CudaColumn<BaseField>>()),
+                };
+                accumulated_numerators_vec.push(AccumulatedNumerators {
+                    sample_point: acc.sample_point,
+                    partial_numerators_acc: gpu_coords,
+                    first_linear_term_acc: acc.first_linear_term_acc,
+                });
+            }
+            return;
+        }
 
         let size = columns[0].len();
 
@@ -117,6 +157,8 @@ impl QuotientOps for CudaBackend {
     fn compute_quotients_and_combine(
         accs: Vec<AccumulatedNumerators<Self>>,
         lifting_log_size: u32,
+        log_blowup_factor: u32,
+        _twiddles: &TwiddleTree<Self>,
     ) -> SecureEvaluation<Self, BitReversedOrder> {
         let _span = span!(
             Level::INFO,
@@ -125,6 +167,40 @@ impl QuotientOps for CudaBackend {
             lifting_log_size = lifting_log_size,
         )
         .entered();
+
+        // Upstream stwo's compute_quotients_and_combine now computes the
+        // quotient on the subdomain (size 2^(lifting_log_size -
+        // log_blowup_factor)) and then lifts via interpolation +
+        // evaluation through the supplied twiddle tree. Our GPU kernel
+        // computes on the full domain and doesn't do the lift. Fall
+        // back to CpuBackend until the kernel rework lands.
+        if log_blowup_factor != 0 {
+            use stwo::prover::poly::circle::PolyOps;
+            use super::column::CudaColumn;
+            let eval_domain = CanonicCoset::new(lifting_log_size).circle_domain();
+            let cpu_twiddles = <CpuBackend as PolyOps>::precompute_twiddles(eval_domain.half_coset);
+            let cpu_accs: Vec<AccumulatedNumerators<CpuBackend>> = accs
+                .into_iter()
+                .map(|acc| AccumulatedNumerators {
+                    sample_point: acc.sample_point,
+                    partial_numerators_acc: acc.partial_numerators_acc.to_cpu(),
+                    first_linear_term_acc: acc.first_linear_term_acc,
+                })
+                .collect();
+            let cpu_result = CpuBackend::compute_quotients_and_combine(
+                cpu_accs,
+                lifting_log_size,
+                log_blowup_factor,
+                &cpu_twiddles,
+            );
+            let gpu_values = SecureColumnByCoords {
+                columns: cpu_result
+                    .values
+                    .columns
+                    .map(|col| col.into_iter().collect::<CudaColumn<BaseField>>()),
+            };
+            return SecureEvaluation::new(cpu_result.domain, gpu_values);
+        }
 
         let n_rows = 1u32 << lifting_log_size;
         let n_accs = accs.len();

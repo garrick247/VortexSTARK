@@ -8,6 +8,16 @@ description = "CUDA GPU backend for stwo Circle STARK prover"
 name = "bench-stwo"
 path = "src/bin/bench_stwo.rs"
 
+[features]
+# Forge-feature passthroughs. These don't add any vortexstark behavior on
+# their own; they let the cuda-backend code's `#[cfg(feature = "forge-*")]`
+# blocks correctly observe whether the parent vortexstark crate has those
+# features turned on, so the cuda-backend can call the forge entry points
+# directly (cuda_*_forge) instead of going through the macro dispatch in
+# the hand-written wrappers.
+forge-bit-reverse = ["vortexstark/forge-bit-reverse"]
+forge-gather = ["vortexstark/forge-gather"]
+
 [dependencies]
 stwo = { git = "https://github.com/garrick99/stwo-fork.git", branch = "cuda-backend", features = ["prover"] }
 stwo-constraint-framework = { git = "https://github.com/garrick99/stwo-fork.git", branch = "cuda-backend", features = ["prover"] }

@@ -157,10 +157,10 @@ fn evaluate_constraint_quotients_impl<E: FrameworkEval + Sync>(
         return;
     }
 
-    if component.is_disabled() {
-        evaluation_accumulator.skip_coeffs(n_constraints);
-        return;
-    }
+    // is_disabled / skip_coeffs were removed from upstream stwo (the
+    // simd ComponentProver in stwo-constraint-framework only checks
+    // n_constraints() == 0 and returns early). Disabled components
+    // simply have n_constraints() == 0 now.
 
     let eval_domain =
         CanonicCoset::new(component.max_constraint_log_degree_bound()).circle_domain();

@@ -38,11 +38,10 @@ impl FriOps for CudaBackend {
     }
 
     fn fold_circle_into_line(
-        dst: &mut LineEvaluation<Self>,
         src: &SecureEvaluation<Self, BitReversedOrder>,
         alpha: SecureField,
         _twiddles: &TwiddleTree<Self>,
-    ) {
+    ) -> LineEvaluation<Self> {
         let n = src.len();
         let half_n = n / 2;
         let domain = src.domain;
@@ -56,16 +55,28 @@ impl FriOps for CudaBackend {
         let d_twiddles = DeviceBuffer::from_host(&inv_y_vals);
 
         let src_cols = &src.values.columns;
-        let dst_cols = &mut dst.values.columns;
+        // Allocate destination buffers (replaces the old &mut dst arg —
+        // upstream stwo's fold_circle_into_line now owns the dst).
+        let mut o0 = DeviceBuffer::<u32>::alloc(half_n);
+        let mut o1 = DeviceBuffer::<u32>::alloc(half_n);
+        let mut o2 = DeviceBuffer::<u32>::alloc(half_n);
+        let mut o3 = DeviceBuffer::<u32>::alloc(half_n);
 
         let alpha_arr = qm31_to_arr(alpha);
         let alpha_sq = alpha * alpha;
         let alpha_sq_arr = qm31_to_arr(alpha_sq);
 
         unsafe {
+            // Pre-zero the new outputs so the SoA kernel's `dst = dst*alpha^2 + f'`
+            // accumulation reduces to plain `dst = f'`. (Upstream takes ownership
+            // of an uninitialized buffer; we match that semantics by zero-init.)
+            ffi::cudaMemset(o0.as_mut_ptr() as *mut _, 0, (half_n * 4) as usize);
+            ffi::cudaMemset(o1.as_mut_ptr() as *mut _, 0, (half_n * 4) as usize);
+            ffi::cudaMemset(o2.as_mut_ptr() as *mut _, 0, (half_n * 4) as usize);
+            ffi::cudaMemset(o3.as_mut_ptr() as *mut _, 0, (half_n * 4) as usize);
             ffi::cuda_fold_circle_into_line_soa(
-                dst_cols[0].buf.as_mut_ptr(), dst_cols[1].buf.as_mut_ptr(),
-                dst_cols[2].buf.as_mut_ptr(), dst_cols[3].buf.as_mut_ptr(),
+                o0.as_mut_ptr(), o1.as_mut_ptr(),
+                o2.as_mut_ptr(), o3.as_mut_ptr(),
                 src_cols[0].buf.as_ptr(), src_cols[1].buf.as_ptr(),
                 src_cols[2].buf.as_ptr(), src_cols[3].buf.as_ptr(),
                 d_twiddles.as_ptr(),
@@ -75,6 +86,19 @@ impl FriOps for CudaBackend {
             );
             ffi::cuda_device_sync();
         }
+
+        let dst_values = SecureColumnByCoords {
+            columns: [
+                CudaColumn::from_device_buffer(o0, half_n),
+                CudaColumn::from_device_buffer(o1, half_n),
+                CudaColumn::from_device_buffer(o2, half_n),
+                CudaColumn::from_device_buffer(o3, half_n),
+            ],
+        };
+        let dst_domain = stwo::core::poly::line::LineDomain::new(
+            stwo::core::circle::Coset::half_odds(domain.log_size() - 1),
+        );
+        LineEvaluation::new(dst_domain, dst_values)
     }
 
     fn decompose(

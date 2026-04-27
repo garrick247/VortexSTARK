@@ -171,7 +171,7 @@ impl<const IS_M31_OUTPUT: bool> MerkleOpsLifted<Blake2sMerkleHasherGeneric<IS_M3
 
 impl PackLeavesOps for CudaBackend {
     fn pack_leaves_input(
-        values: &[Col<Self, BaseField>; SECURE_EXTENSION_DEGREE],
+        values: &[&Col<Self, BaseField>; SECURE_EXTENSION_DEGREE],
     ) -> [Col<Self, BaseField>; SECURE_EXTENSION_DEGREE * PACKED_LEAF_SIZE] {
         let n = values[0].len();
         assert!(n % PACKED_LEAF_SIZE == 0, "N must be a multiple of PACKED_LEAF_SIZE=16");

@@ -275,6 +275,66 @@ mod tests {
         }
     }
 
+    /// Bug-2 regression: re-run the leaf-hash parity check WITHOUT the
+    /// shinobi-hash feature so it surfaces under any cargo-feature combo
+    /// that has forge-blake2s on (e.g., forge-blake2s + forge-permute,
+    /// the failing combo in test_prove_lean_matches_prove). If forge merkle
+    /// produces different output than the hand-written kernel for the
+    /// same input, the divergence is in the forge kernel itself rather
+    /// than upstream NTT/eval data — which localizes the cross-TU bug.
+    #[test]
+    #[cfg(feature = "forge-blake2s")]
+    fn gpu_forge_leaf_hash_parity_for_bug2() {
+        use crate::cuda::ffi;
+        use crate::device::DeviceBuffer;
+
+        let n_leaves: u32 = 1000;
+        let column: Vec<u32> = (0..n_leaves)
+            .map(|i| (i.wrapping_mul(0x9E37_79B9)) ^ 0xDEAD_BEEF)
+            .collect();
+
+        let d_col = DeviceBuffer::from_host(&column);
+        let col_ptrs: Vec<*const u32> = vec![d_col.as_ptr()];
+        let d_col_ptrs = DeviceBuffer::from_host(&col_ptrs);
+
+        let mut d_ref = DeviceBuffer::<u32>::alloc((n_leaves as usize) * 8);
+        unsafe {
+            ffi::cuda_merkle_hash_leaves(
+                d_col_ptrs.as_ptr() as *const *const u32,
+                d_ref.as_mut_ptr(),
+                1,
+                n_leaves,
+            );
+            assert_eq!(ffi::cudaDeviceSynchronize(), 0);
+        }
+        let ref_hashes = d_ref.to_host();
+
+        let mut d_forge = DeviceBuffer::<u32>::alloc((n_leaves as usize) * 8);
+        unsafe {
+            ffi::cuda_merkle_hash_leaves_forge_single(
+                d_col.as_ptr(),
+                d_forge.as_mut_ptr(),
+                n_leaves,
+            );
+            assert_eq!(ffi::cudaDeviceSynchronize(), 0);
+        }
+        let forge_hashes = d_forge.to_host();
+
+        if forge_hashes != ref_hashes {
+            for i in 0..n_leaves as usize {
+                let lo = i * 8;
+                let hi = lo + 8;
+                if forge_hashes[lo..hi] != ref_hashes[lo..hi] {
+                    eprintln!("[bug2] leaf {i}: forge={:08x?} ref={:08x?}",
+                              &forge_hashes[lo..hi], &ref_hashes[lo..hi]);
+                    if i > 4 { break; }
+                }
+            }
+        }
+        assert_eq!(forge_hashes, ref_hashes,
+                   "FORGE leaf-hash diverges from hand-written under this feature combo");
+    }
+
     /// FORGE-emitted single-column leaf-hash kernel
     /// (cuda/merkle_hash_leaves_forge.cu, generated from
     /// forge/analysis/vortex_ntt/merkle_hash_leaves.fg with 133 proof
@@ -335,6 +395,55 @@ mod tests {
         for &w in &forge_hashes {
             assert!(w < M31_P, "FORGE output {w:#x} must be < P (M31-reduced)");
         }
+    }
+
+    /// Bug-2 quad-variant regression: same parity check as
+    /// gpu_forge_leaf_hash_parity_for_bug2 but for n_cols = 4 (the
+    /// shape used by quotient_commit in prove()). Catches drift
+    /// without needing shinobi-hash to be on.
+    #[test]
+    #[cfg(feature = "forge-blake2s")]
+    fn gpu_forge_leaf_hash_quad_parity_for_bug2() {
+        use crate::cuda::ffi;
+        use crate::device::DeviceBuffer;
+
+        let n_leaves: u32 = 1000;
+        let cols: [Vec<u32>; 4] = [
+            (0..n_leaves).map(|i| i.wrapping_mul(0x9E37_79B9) ^ 0xDEAD_BEEF).collect(),
+            (0..n_leaves).map(|i| i.wrapping_mul(0x6A09_E667) ^ 0xCAFE_F00D).collect(),
+            (0..n_leaves).map(|i| i.wrapping_mul(0xBB67_AE85) ^ 0x1234_5678).collect(),
+            (0..n_leaves).map(|i| i.wrapping_mul(0x3C6E_F372) ^ 0x0BAD_F00D).collect(),
+        ];
+        let d_cols: Vec<DeviceBuffer<u32>> =
+            cols.iter().map(|c| DeviceBuffer::from_host(c)).collect();
+        let col_ptrs: Vec<*const u32> = d_cols.iter().map(|d| d.as_ptr()).collect();
+        let d_col_ptrs = DeviceBuffer::from_host(&col_ptrs);
+
+        let mut d_ref = DeviceBuffer::<u32>::alloc((n_leaves as usize) * 8);
+        unsafe {
+            ffi::cuda_merkle_hash_leaves(
+                d_col_ptrs.as_ptr() as *const *const u32,
+                d_ref.as_mut_ptr(),
+                4,
+                n_leaves,
+            );
+            assert_eq!(ffi::cudaDeviceSynchronize(), 0);
+        }
+        let ref_hashes = d_ref.to_host();
+
+        let mut d_forge = DeviceBuffer::<u32>::alloc((n_leaves as usize) * 8);
+        unsafe {
+            ffi::cuda_merkle_hash_leaves_forge_quad(
+                d_cols[0].as_ptr(), d_cols[1].as_ptr(),
+                d_cols[2].as_ptr(), d_cols[3].as_ptr(),
+                d_forge.as_mut_ptr(),
+                n_leaves,
+            );
+            assert_eq!(ffi::cudaDeviceSynchronize(), 0);
+        }
+        let forge_hashes = d_forge.to_host();
+        assert_eq!(forge_hashes, ref_hashes,
+                   "FORGE quad leaf-hash diverges from hand-written under this feature combo");
     }
 
     /// FORGE-emitted 4-column SoA leaf-hash kernel. Same parity check

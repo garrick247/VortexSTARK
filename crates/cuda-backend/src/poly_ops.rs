@@ -16,7 +16,7 @@ use stwo::prover::backend::{Column, CpuBackend};
 use stwo::prover::poly::circle::{
     CircleCoefficients, CircleEvaluation, PolyOps,
 };
-use stwo::prover::poly::twiddles::TwiddleTree;
+use stwo::prover::poly::twiddles::{TwiddleBuffer, TwiddleTree};
 use stwo::prover::poly::BitReversedOrder;
 
 use vortexstark::circle::Coset as VortexCoset;
@@ -29,6 +29,39 @@ use super::column::CudaColumn;
 /// GPU twiddle factors (placeholder — not used for NTT yet).
 pub struct CudaTwiddles {
     pub cache: TwiddleCache,
+}
+
+/// Required by `PolyOps::Twiddles` since stwo introduced subdomain twiddle
+/// extraction. We don't currently use these for the GPU NTT path (kernels
+/// build their own GPU-resident twiddle cache via `cached_gpu_twiddles`),
+/// so the impl mirrors the trait's CPU semantics through the cached CPU
+/// twiddle pair: `empty()` produces a placeholder cache, and
+/// `extract_subdomain_twiddles` defers to the `Vec<T>` impl on the cached
+/// CPU twiddles. Subdomain extraction only matters when the caller passes
+/// these twiddles to the QuotientOps lift step, which already falls back
+/// to CpuBackend.
+impl TwiddleBuffer<BitReversedOrder> for CudaTwiddles {
+    fn empty() -> Self {
+        // Single-point coset placeholder. The empty() result is only used
+        // as a sentinel (callers fall back to CpuBackend when they need
+        // real subdomain extraction).
+        CudaTwiddles {
+            cache: TwiddleCache::new(&VortexCoset::subgroup(0)),
+        }
+    }
+
+    fn extract_subdomain_twiddles(
+        &self,
+        _domain_log_size: u32,
+        _subdomain_log_size: u32,
+    ) -> Self {
+        // Subdomain extraction not yet exercised on the GPU twiddle cache —
+        // the only caller that would hit it (compute_quotients_and_combine
+        // with log_blowup_factor != 0) currently falls back to CpuBackend
+        // which builds its own twiddles. Return an empty placeholder so the
+        // type-level contract holds.
+        <Self as TwiddleBuffer<BitReversedOrder>>::empty()
+    }
 }
 
 // ---------------------------------------------------------------------------

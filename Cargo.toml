@@ -14,27 +14,24 @@ name = "vortexstark"
 path = "src/lib.rs"
 
 [features]
-# Default-on: the three FORGE-emitted kernel paths with documented
-# microbench wins (forge-ntt 5x at n=2^20, forge-fri 7.8x at half_n=
-# 2^19, forge-ntt-batch reuses the forge-ntt kernel body across all
-# columns). All three pass the 394-test suite identical to the
-# hand-written variants — confirmed in CI. Opt out with
-# --no-default-features to compare against the hand-written baseline.
-#
-# The other six FORGE features (bit-reverse, gather, blake2s, permute,
-# barycentric, grind) each pass 394/394 *individually* on top of the
-# default-on three.  Combining all nine together miscompiles the M31
-# prover: enabling forge-blake2s alongside any of {permute, grind}
-# (and presumably barycentric) silently produces 4 prove/verify
-# roundtrip failures.  Suspected nvcc LTO / inter-TU `static
-# __device__ __forceinline__` interaction across multiple forge-
-# emitted .cu files (each defines its own helpers like rotr32 / g_mix
-# / bit_reverse_u32; no shared external symbols, but the static
-# inlines are treated specially under whole-program optimization).
-# Not blocking — each opt-in combo with the proven-three default
-# still gives parity.  Worth a forge-codegen bug report once
-# isolated; tracked in project_forge_vortexstark_migration memory.
-default = ["forge-ntt", "forge-ntt-batch", "forge-fri"]
+# Default-on: all nine FORGE-emitted kernel paths. Bug 2 fixed
+# 2026-04-27 — root cause was the merkle_hash_leaves.fg source calling
+# `reduce_word` on every Blake2s output word unconditionally, while the
+# hand-written `cuda_merkle_hash_leaves` only reduces under
+# SHINOBI_HASH_REDUCE (i.e. the `shinobi-hash` feature). With
+# forge-blake2s on, prove() routed n_cols∈{1,4} through the FORGE
+# kernel (reduced output) but prove_lean()'s commit_root_only path
+# still used the hand-written kernel (raw 32-bit output). Hashes
+# diverged for any leaf whose Blake2s digest had bit 31 set in any
+# word — exactly what the 4 failing M31 prover roundtrip tests caught.
+# The .fg source now writes raw `out*` and the CPU/GPU mirror agrees
+# regardless of feature combo. Opt out with --no-default-features to
+# compare against the hand-written baseline.
+default = [
+    "forge-ntt", "forge-ntt-batch", "forge-fri",
+    "forge-blake2s", "forge-permute", "forge-bit-reverse",
+    "forge-gather", "forge-barycentric", "forge-grind",
+]
 # Drop BLOWUP_BITS from 2 to 1 (2x vs 4x evaluation blowup). Used to measure the
 # 1B-element (log_n=30) headline benchmark; the default BLOWUP_BITS=2 hits a
 # hard assertion because log_eval=32 exceeds M31's circle subgroup order of 2^31.
