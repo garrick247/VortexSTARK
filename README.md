@@ -18,7 +18,7 @@ Forge (.fg)  ──►  CUDA C  ──►  nvcc  ──►  cubin  ──►  GP
                     permute, bit-reverse, gather, barycentric, grind
 ```
 
-Open-toolchain build (no NVIDIA compiler) is also supported via the [OpenCUDA](https://github.com/garrick99/opencuda) + [OpenPTXas](https://github.com/garrick99/openptxas) pair — they consume the same Forge-emitted CUDA C / PTX.
+Open-toolchain build (no NVIDIA compiler) is also supported via the [OpenCUDA](https://github.com/garrick99/opencuda) + [OpenPTXas](https://github.com/garrick99/openptxas) pair — they consume the same Forge-emitted CUDA C / PTX. Cross-stack tooling (run / compare / benchmark / classify any kernel through any backend) lives in [forge-workbench](https://github.com/garrick99/forge-workbench).
 
 Source-available under [BSL 1.1](LICENSE), converts to Apache 2.0 on **2029-03-20**. Non-production use permitted today; commercial licensing available before the conversion date — contact garrick.wagner@gmail.com.
 
