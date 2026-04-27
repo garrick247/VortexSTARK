@@ -322,30 +322,6 @@ fn commit_leaves_gpu(
     let mut d_hashes = DeviceBuffer::<u32>::alloc(n * 8);
 
     unsafe {
-        // FORGE-emitted fast paths exist for the common n_cols ∈ {1,4}
-        // shapes (single-column trees and quad-column SoA leaves).
-        // Fall through to the n_cols-arbitrary hand-written kernel
-        // for any other column count.
-        #[cfg(feature = "forge-merkle-leaves")]
-        match n_cols {
-            1 => ffi::cuda_merkle_hash_leaves_forge_single(
-                col_ptrs[0],
-                d_hashes.as_mut_ptr(),
-                n as u32,
-            ),
-            4 => ffi::cuda_merkle_hash_leaves_forge_quad(
-                col_ptrs[0], col_ptrs[1], col_ptrs[2], col_ptrs[3],
-                d_hashes.as_mut_ptr(),
-                n as u32,
-            ),
-            _ => ffi::cuda_merkle_hash_leaves(
-                d_col_ptrs.as_ptr() as *const *const u32,
-                d_hashes.as_mut_ptr(),
-                n_cols,
-                n as u32,
-            ),
-        }
-        #[cfg(not(feature = "forge-merkle-leaves"))]
         ffi::cuda_merkle_hash_leaves(
             d_col_ptrs.as_ptr() as *const *const u32,
             d_hashes.as_mut_ptr(),

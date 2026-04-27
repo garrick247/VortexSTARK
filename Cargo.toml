@@ -14,7 +14,13 @@ name = "vortexstark"
 path = "src/lib.rs"
 
 [features]
-default = []
+# Default-on: the three FORGE-emitted kernel paths with documented
+# microbench wins (forge-ntt 5x at n=2^20, forge-fri 7.8x at half_n=
+# 2^19, forge-ntt-batch reuses the forge-ntt kernel body across all
+# columns). All three pass the 394-test suite identical to the
+# hand-written variants — confirmed in CI. Opt out with
+# --no-default-features to compare against the hand-written baseline.
+default = ["forge-ntt", "forge-ntt-batch", "forge-fri"]
 # Drop BLOWUP_BITS from 2 to 1 (2x vs 4x evaluation blowup). Used to measure the
 # 1B-element (log_n=30) headline benchmark; the default BLOWUP_BITS=2 hits a
 # hard assertion because log_eval=32 exceeds M31's circle subgroup order of 2^31.
@@ -70,12 +76,6 @@ forge-bit-reverse = []
 # check the indexed load — host already knows that length, so the
 # only Rust-side change is passing self.buf.len() as src_len.
 forge-gather = []
-# Route Merkle leaf hashing through the FORGE-emitted single- and
-# quad-column variants when n_cols ∈ {1,4}; falls through to the
-# hand-written n_cols-arbitrary kernel for other column counts.
-# Sources: forge/analysis/vortex_ntt/merkle_hash_leaves.fg (133+
-# obligations for the single, 145 total including the quad form).
-forge-merkle-leaves = []
 
 [[bin]]
 name = "vortex-bench"
