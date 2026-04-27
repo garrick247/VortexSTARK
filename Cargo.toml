@@ -20,6 +20,20 @@ path = "src/lib.rs"
 # columns). All three pass the 394-test suite identical to the
 # hand-written variants — confirmed in CI. Opt out with
 # --no-default-features to compare against the hand-written baseline.
+#
+# The other six FORGE features (bit-reverse, gather, blake2s, permute,
+# barycentric, grind) each pass 394/394 *individually* on top of the
+# default-on three.  Combining all nine together miscompiles the M31
+# prover: enabling forge-blake2s alongside any of {permute, grind}
+# (and presumably barycentric) silently produces 4 prove/verify
+# roundtrip failures.  Suspected nvcc LTO / inter-TU `static
+# __device__ __forceinline__` interaction across multiple forge-
+# emitted .cu files (each defines its own helpers like rotr32 / g_mix
+# / bit_reverse_u32; no shared external symbols, but the static
+# inlines are treated specially under whole-program optimization).
+# Not blocking — each opt-in combo with the proven-three default
+# still gives parity.  Worth a forge-codegen bug report once
+# isolated; tracked in project_forge_vortexstark_migration memory.
 default = ["forge-ntt", "forge-ntt-batch", "forge-fri"]
 # Drop BLOWUP_BITS from 2 to 1 (2x vs 4x evaluation blowup). Used to measure the
 # 1B-element (log_n=30) headline benchmark; the default BLOWUP_BITS=2 hits a
