@@ -59,6 +59,23 @@ forge-ntt-batch = []
 # fri_fold_circle.fg (237). Microbench at half_n=2^19: hand-written
 # 108µs vs FORGE 14µs (7.8x). Macro dispatch in cuda/fri.cu.
 forge-fri = []
+# Route SecureField bit-reverse (QM31, 4-u32-per-element) through the
+# FORGE-emitted kernel via cuda_bit_reverse_qm31_forge. Source:
+# forge/analysis/vortex_ntt/bit_reverse_qm31.fg (12 obligations).
+# Dispatch is at the Rust call site in cuda-backend::column.
+forge-bit-reverse = []
+# Route gather_indices (u32 BaseField + u256 Blake2sHash) through the
+# FORGE-emitted kernels via cuda_gather_u32_forge / _u256_forge. The
+# FORGE variants take an explicit src_len so the kernel can bounds-
+# check the indexed load — host already knows that length, so the
+# only Rust-side change is passing self.buf.len() as src_len.
+forge-gather = []
+# Route Merkle leaf hashing through the FORGE-emitted single- and
+# quad-column variants when n_cols ∈ {1,4}; falls through to the
+# hand-written n_cols-arbitrary kernel for other column counts.
+# Sources: forge/analysis/vortex_ntt/merkle_hash_leaves.fg (133+
+# obligations for the single, 145 total including the quad form).
+forge-merkle-leaves = []
 
 [[bin]]
 name = "vortex-bench"

@@ -221,7 +221,15 @@ impl ColumnOps<SecureField> for CudaBackend {
         // Each QM31 element occupies 4 consecutive u32s in the buffer.
         let mut d_tmp = DeviceBuffer::<u32>::alloc(n * 4);
         unsafe {
+            #[cfg(not(feature = "forge-bit-reverse"))]
             ffi::cuda_bit_reverse_qm31(
+                column.buf.as_ptr(),
+                d_tmp.as_mut_ptr(),
+                n as u32,
+                log_n,
+            );
+            #[cfg(feature = "forge-bit-reverse")]
+            ffi::cuda_bit_reverse_qm31_forge(
                 column.buf.as_ptr(),
                 d_tmp.as_mut_ptr(),
                 n as u32,
@@ -486,7 +494,10 @@ impl CudaColumn<BaseField> {
         let d_idx = DeviceBuffer::from_host(&idx_u32);
         let mut d_out = DeviceBuffer::<u32>::alloc(indices.len());
         unsafe {
+            #[cfg(not(feature = "forge-gather"))]
             ffi::cuda_gather_u32(self.buf.as_ptr(), d_idx.as_ptr(), d_out.as_mut_ptr(), indices.len() as u32);
+            #[cfg(feature = "forge-gather")]
+            ffi::cuda_gather_u32_forge(self.buf.as_ptr(), d_idx.as_ptr(), d_out.as_mut_ptr(), indices.len() as u32, self.buf.len() as u32);
             ffi::cuda_device_sync();
         }
         d_out.to_host().into_iter().map(|v| BaseField::from_u32_unchecked(v)).collect()
@@ -501,7 +512,10 @@ impl CudaColumn<Blake2sHash> {
         let d_idx = DeviceBuffer::from_host(&idx_u32);
         let mut d_out = DeviceBuffer::<u32>::alloc(indices.len() * 8);
         unsafe {
+            #[cfg(not(feature = "forge-gather"))]
             ffi::cuda_gather_u256(self.buf.as_ptr(), d_idx.as_ptr(), d_out.as_mut_ptr(), indices.len() as u32);
+            #[cfg(feature = "forge-gather")]
+            ffi::cuda_gather_u256_forge(self.buf.as_ptr(), d_idx.as_ptr(), d_out.as_mut_ptr(), indices.len() as u32, self.buf.len() as u32);
             ffi::cuda_device_sync();
         }
         d_out.to_host().chunks_exact(8).map(|c| {
