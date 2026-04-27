@@ -127,6 +127,14 @@ fn main() {
             cmd.args(["-DFORGE_PERMUTE=1"]);
         }
 
+        // forge-barycentric feature: cuda/barycentric_eval.cu's entry
+        // point routes to cuda_barycentric_eval_forge (FORGE-emitted,
+        // 197 obligations discharged + 9 assume() carries for warp-
+        // shuffle and EIf write-back).
+        if env::var("CARGO_FEATURE_FORGE_BARYCENTRIC").is_ok() {
+            cmd.args(["-DFORGE_BARYCENTRIC=1"]);
+        }
+
         // On Windows, nvcc may reject newer MSVC/SDK versions as an unsupported host compiler.
         // Use an older MSVC (14.44 / VS 2022) and an older Windows SDK (22621) for CUDA
         // host compilation, which CUDA 13.x is known to support.

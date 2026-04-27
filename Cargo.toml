@@ -81,6 +81,13 @@ forge-gather = []
 # forge/analysis/vortex_ntt/permute.fg (9 proof obligations).
 # Macro dispatch in cuda/permute.cu, host shims in cuda/permute_forge.cu.
 forge-permute = []
+# Route the barycentric polynomial evaluation kernel through the
+# FORGE-emitted variant. Source:
+# forge/analysis/vortex_ntt/barycentric_eval.fg
+# (197 proof obligations + 9 assume() carries for warp-shuffle and
+# EIf write-back invariants).  Macro dispatch in cuda/barycentric_eval.cu;
+# host shim in cuda/barycentric_eval_forge.cu.
+forge-barycentric = []
 
 [[bin]]
 name = "vortex-bench"

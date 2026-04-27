@@ -13,6 +13,18 @@
 #include "include/m31.cuh"
 #include "include/qm31.cuh"
 
+// FORGE barycentric_eval wire-in: when `forge-barycentric` cargo feature
+// is on, build.rs defines FORGE_BARYCENTRIC=1 and cuda_barycentric_eval
+// routes to the proof-checked FORGE host shim in
+// cuda/barycentric_eval_forge.cu (source forge/analysis/vortex_ntt/
+// barycentric_eval.fg, 197 proof obligations + 9 user-supplied
+// assumptions for warp-shuffle and EIf write-back invariants).
+#ifdef FORGE_BARYCENTRIC
+extern "C" void cuda_barycentric_eval_forge(
+    const uint32_t* evals, const uint32_t* weights,
+    uint32_t n, uint32_t* out, uint32_t n_blocks);
+#endif
+
 // Warp-level QM31 reduction using shuffle.
 __device__ __forceinline__
 QM31 warp_reduce_qm31(QM31 val) {
@@ -88,9 +100,13 @@ void cuda_barycentric_eval(
     uint32_t* out,
     uint32_t n_blocks
 ) {
+#ifdef FORGE_BARYCENTRIC
+    cuda_barycentric_eval_forge(evals, weights, n, out, n_blocks);
+#else
     uint32_t threads = 256;
     barycentric_eval_kernel<<<n_blocks, threads>>>(evals, weights, n, out);
     cudaDeviceSynchronize();
+#endif
 }
 
 } // extern "C"
