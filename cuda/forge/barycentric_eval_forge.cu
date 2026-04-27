@@ -110,19 +110,16 @@ static __device__ __forceinline__ uint32_t warp_xor_m31(uint32_t v __attribute__
 }
 
 static __device__ __forceinline__ uint32_t warp_reduce_m31_sum(uint32_t v __attribute__((unused))) {
-  uint32_t a __attribute__((unused)) = v;
-  /* assume erased */;
-  uint32_t s16 __attribute__((unused)) = warp_xor_m31(a, 16ULL);
-  a = m31_add(a, s16);
-  uint32_t s8 __attribute__((unused)) = warp_xor_m31(a, 8ULL);
-  a = m31_add(a, s8);
-  uint32_t s4 __attribute__((unused)) = warp_xor_m31(a, 4ULL);
-  a = m31_add(a, s4);
-  uint32_t s2 __attribute__((unused)) = warp_xor_m31(a, 2ULL);
-  a = m31_add(a, s2);
-  uint32_t s1 __attribute__((unused)) = warp_xor_m31(a, 1ULL);
-  a = m31_add(a, s1);
-  return a;
+  uint32_t s16 __attribute__((unused)) = warp_xor_m31(v, 16ULL);
+  uint32_t a16 __attribute__((unused)) = m31_add(v, s16);
+  uint32_t s8 __attribute__((unused)) = warp_xor_m31(a16, 8ULL);
+  uint32_t a8 __attribute__((unused)) = m31_add(a16, s8);
+  uint32_t s4 __attribute__((unused)) = warp_xor_m31(a8, 4ULL);
+  uint32_t a4 __attribute__((unused)) = m31_add(a8, s4);
+  uint32_t s2 __attribute__((unused)) = warp_xor_m31(a4, 2ULL);
+  uint32_t a2 __attribute__((unused)) = m31_add(a4, s2);
+  uint32_t s1 __attribute__((unused)) = warp_xor_m31(a2, 1ULL);
+  return m31_add(a2, s1);
 }
 
 __global__ void barycentric_eval(forge_span_u32_t evals __attribute__((unused)), forge_span_u32_t weights __attribute__((unused)), forge_span_u32_t out __attribute__((unused)), uint64_t n __attribute__((unused))) {
@@ -139,29 +136,42 @@ __global__ void barycentric_eval(forge_span_u32_t evals __attribute__((unused)),
       /* assert erased */;
       uint32_t e __attribute__((unused)) = evals.data[i];
       uint64_t wb __attribute__((unused)) = (i * 4ULL);
-      uint32_t t0 __attribute__((unused)) = 0ULL;
-      uint32_t t1 __attribute__((unused)) = 0ULL;
-      uint32_t t2 __attribute__((unused)) = 0ULL;
-      uint32_t t3 __attribute__((unused)) = 0ULL;
+      uint32_t t0_raw;
       if (((wb + 3ULL) < weights.len)) {
         /* assert erased */;
-        /* assert erased */;
-        /* assert erased */;
-        /* assert erased */;
         uint32_t w0 __attribute__((unused)) = weights.data[wb];
-        uint32_t w1 __attribute__((unused)) = weights.data[(wb + 1ULL)];
-        uint32_t w2 __attribute__((unused)) = weights.data[(wb + 2ULL)];
-        uint32_t w3 __attribute__((unused)) = weights.data[(wb + 3ULL)];
-        t0 = m31_mul(w0, e);
-        t1 = m31_mul(w1, e);
-        t2 = m31_mul(w2, e);
-        t3 = m31_mul(w3, e);
-
+        t0_raw = m31_mul(w0, e);
+      } else {
+        t0_raw = 0ULL;
       }
-      /* assume erased */;
-      /* assume erased */;
-      /* assume erased */;
-      /* assume erased */;
+      uint32_t t0 __attribute__((unused)) = (t0_raw % M31_P);
+      uint32_t t1_raw;
+      if (((wb + 3ULL) < weights.len)) {
+        /* assert erased */;
+        uint32_t w1 __attribute__((unused)) = weights.data[(wb + 1ULL)];
+        t1_raw = m31_mul(w1, e);
+      } else {
+        t1_raw = 0ULL;
+      }
+      uint32_t t1 __attribute__((unused)) = (t1_raw % M31_P);
+      uint32_t t2_raw;
+      if (((wb + 3ULL) < weights.len)) {
+        /* assert erased */;
+        uint32_t w2 __attribute__((unused)) = weights.data[(wb + 2ULL)];
+        t2_raw = m31_mul(w2, e);
+      } else {
+        t2_raw = 0ULL;
+      }
+      uint32_t t2 __attribute__((unused)) = (t2_raw % M31_P);
+      uint32_t t3_raw;
+      if (((wb + 3ULL) < weights.len)) {
+        /* assert erased */;
+        uint32_t w3 __attribute__((unused)) = weights.data[(wb + 3ULL)];
+        t3_raw = m31_mul(w3, e);
+      } else {
+        t3_raw = 0ULL;
+      }
+      uint32_t t3 __attribute__((unused)) = (t3_raw % M31_P);
       a0 = m31_add(a0, t0);
       a1 = m31_add(a1, t1);
       a2 = m31_add(a2, t2);
@@ -197,14 +207,10 @@ __global__ void barycentric_eval(forge_span_u32_t evals __attribute__((unused)),
     if ((lane_id < n_warps)) {
       uint64_t so2 __attribute__((unused)) = (lane_id * 4ULL);
       if (((so2 + 3ULL) < 128ULL)) {
-        /* assume erased */;
-        /* assume erased */;
-        /* assume erased */;
-        /* assume erased */;
-        b0 = smem[so2];
-        b1 = smem[(so2 + 1ULL)];
-        b2 = smem[(so2 + 2ULL)];
-        b3 = smem[(so2 + 3ULL)];
+        b0 = (smem[so2] % M31_P);
+        b1 = (smem[(so2 + 1ULL)] % M31_P);
+        b2 = (smem[(so2 + 2ULL)] % M31_P);
+        b3 = (smem[(so2 + 3ULL)] % M31_P);
 
       }
 
@@ -228,25 +234,3 @@ __global__ void barycentric_eval(forge_span_u32_t evals __attribute__((unused)),
   }
 }
 
-
-/* ---- FORGE ASSUMPTION AUDIT LOG ----
-   Total assumptions: 9
-   [ASSUME] /mnt/c/users/kraken/forge/analysis/vortex_ntt/barycentric_eval.fg:51  (< a M31_P)
-             "a aliases v initially; v < M31_P from precondition"
-   [ASSUME] /mnt/c/users/kraken/forge/analysis/vortex_ntt/barycentric_eval.fg:132  (< t0 M31_P)
-             "either initial 0 or m31_mul postcondition"
-   [ASSUME] /mnt/c/users/kraken/forge/analysis/vortex_ntt/barycentric_eval.fg:133  (< t1 M31_P)
-             "either initial 0 or m31_mul postcondition"
-   [ASSUME] /mnt/c/users/kraken/forge/analysis/vortex_ntt/barycentric_eval.fg:134  (< t2 M31_P)
-             "either initial 0 or m31_mul postcondition"
-   [ASSUME] /mnt/c/users/kraken/forge/analysis/vortex_ntt/barycentric_eval.fg:135  (< t3 M31_P)
-             "either initial 0 or m31_mul postcondition"
-   [ASSUME] /mnt/c/users/kraken/forge/analysis/vortex_ntt/barycentric_eval.fg:184  (< (select smem so2) M31_P)
-             "smem populated by warp lane-0 m31_add result"
-   [ASSUME] /mnt/c/users/kraken/forge/analysis/vortex_ntt/barycentric_eval.fg:185  (< (select smem (+ so2 1)) M31_P)
-             "smem populated by warp lane-0 m31_add result"
-   [ASSUME] /mnt/c/users/kraken/forge/analysis/vortex_ntt/barycentric_eval.fg:186  (< (select smem (+ so2 2)) M31_P)
-             "smem populated by warp lane-0 m31_add result"
-   [ASSUME] /mnt/c/users/kraken/forge/analysis/vortex_ntt/barycentric_eval.fg:187  (< (select smem (+ so2 3)) M31_P)
-             "smem populated by warp lane-0 m31_add result"
-   ---- END AUDIT LOG ---- */
