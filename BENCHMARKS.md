@@ -742,3 +742,28 @@ rayon par_iter with index-independent `coset.at(i)` (instead of sequential
 D→H→CPU→H→D round-trips by doing permutes on GPU via
 `cuda_permute_hc_to_canonic_brt` / `cuda_permute_canonic_brt_to_hc_natural`.
 See `PERF_ROADMAP.md` for commit-by-commit attribution.
+
+## CHECKPOINT: FORGE feature surface end-to-end (2026-04-27)
+
+Three-way comparison after defaulting `forge-ntt + forge-ntt-batch + forge-fri`
+on (commit `c5c4fff`).  `forge_bench` cairo_prove (Fibonacci) at log_n=18,
+3 timed iters post 2 warmup, RTX 5090 / driver 595.79 / CUDA 13.2 / WSL2.
+
+| Config | Mean | Stddev | Δ vs hand-written |
+|---|---:|---:|---:|
+| `--no-default-features` (hand-written kernels) | 0.6071s | ±0.019s | — |
+| default (forge-ntt + forge-ntt-batch + forge-fri) | 0.6233s | ±0.012s | +2.7% (within 1σ) |
+| default + forge-bit-reverse + forge-gather + forge-blake2s | 0.6077s | ±0.007s | +0.1% (statistical tie) |
+
+The 5× / 7.8× microbench wins documented for the NTT and FRI kernels do **not**
+show up end-to-end at log_n=18 — the NTT layer is sub-1% of total prover
+wallclock at this size, so Amdahl-bound. WSL2's sync-cudaMalloc fallback (the
+pool API isn't supported on WSL2) also caps any pool-async benefit.
+
+**Honest read: the FORGE-emitted variants ship formal verification at parity
+end-to-end wallclock at log_n=18.**  The microbench wins should translate to
+end-to-end speedup at log_n≥24 where NTT/FRI dominate the phase budget; the
+clean measurement environment for that is the Linux native CI runner with
+pool-async allocations enabled.
+
+Raw bench data: `BENCH_2026-04-27_log_n18.txt`.
