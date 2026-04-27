@@ -2,7 +2,23 @@
 
 GPU-native Circle STARK prover with end-to-end proof generation and verification on NVIDIA Blackwell (RTX 5090) and Ada Lovelace (RTX 4090). Rust + CUDA.
 
+## What is this?
+
 To our knowledge, the only public Circle STARK prover with a real GPU backend. The upstream `stwo` reference implementation (Starkware) runs on CPU; VortexSTARK is a from-scratch CUDA implementation of the same construction — trace generation, NTT, Merkle commitment, LogUp interaction, FRI, and proof-of-work all run kernel-side with no host round-trips on the hot path.
+
+Two STARK flavors ship in-tree:
+- **Fibonacci STARK** — the canonical 1-column / 1-transition example, used as the prover/verifier baseline and benchmark target
+- **Cairo VM STARK** — full 34-column trace with 35 transition constraints, prove arbitrary Cairo programs (.casm or fetched from Starknet)
+
+Nine of the prover's GPU kernels are emitted by **[Forge](https://github.com/garrick99/forge)** (a formally-verified systems language with Z3 proof discharge) and run default-on. Total of **0 user-supplied `assume()`** across the forge-emitted surface — every fact in the production prover is SMT-discharged.
+
+```
+Forge (.fg)  ──►  CUDA C  ──►  nvcc  ──►  cubin  ──►  GPU (in-tree prover)
+                  ↑ 9 kernels in production: NTT, NTT-batch, FRI, blake2s,
+                    permute, bit-reverse, gather, barycentric, grind
+```
+
+Open-toolchain build (no NVIDIA compiler) is also supported via the [OpenCUDA](https://github.com/garrick99/opencuda) + [OpenPTXas](https://github.com/garrick99/openptxas) pair — they consume the same Forge-emitted CUDA C / PTX.
 
 Source-available under [BSL 1.1](LICENSE), converts to Apache 2.0 on **2029-03-20**. Non-production use permitted today; commercial licensing available before the conversion date — contact garrick.wagner@gmail.com.
 
@@ -148,14 +164,17 @@ Requires: Rust 1.85+ (stable), CUDA 13.0+, RTX 5090 (SM 12.0) or RTX 4090 (SM 8.
 
 ```bash
 cargo build --release
-cargo test                          # 396 lib + 35 integration = 431 total (429 pass, 3 #[ignore])
+cargo test --release --workspace -- --test-threads=1
+# Workspace totals: 396 lib + 49 vortex-cuda-backend + 35 integration = 480 pass, 0 fail, 3 #[ignore]
 cargo run --release --bin full_benchmark
 cargo run --release --bin gpu_bench     # pre-flight checks + per-section GPU telemetry
 ```
 
+The default build enables all 9 Forge-emitted kernel paths (`forge-ntt`, `forge-ntt-batch`, `forge-fri`, `forge-blake2s`, `forge-permute`, `forge-bit-reverse`, `forge-gather`, `forge-barycentric`, `forge-grind`). Compare against the hand-written CUDA baseline with `cargo test --no-default-features` (394 pass).
+
 ## Tests
 
-396 lib + 35 integration = 431 total (429 pass, 3 marked `#[ignore]` for benchmark/live-RPC opt-in) covering: M31/CM31/QM31 field arithmetic, Circle NTT, Merkle tree (commit, auth paths, tiled, SoA4), FRI (fold, circle fold, deterministic), STARK prover + verifier (multiple sizes, tamper detection), Cairo VM (decoder, executor, Fibonacci, constraints, LogUp, range checks, instruction decomposition), Poseidon, Pedersen (Stark252 field, EC ops, GPU vs CPU), Bitwise (memory segment, trace generation, verifier native recompute against Fiat-Shamir-bound (x, y), prove/verify round-trip, tamper detection, 32-bit input acceptance, forged-row rejection), LogUp/RC soundness (memory table commitment, cancellation check, RC counts commitment), OODS quotient formula correctness, GPU constraint eval (bytecode VM, warp-cooperative), GPU leaf hashing (Blake2s, domain separation), CASM loader, Cairo hints (AllocSegment, AllocFelt252Dict, dict entry lifecycle, squash, U256InvModN with 7 comprehensive test vectors), Fiat-Shamir transcript ordering (12 commitment points), property tests (completeness, soundness, random mutations), cross-validation (reference VM comparison for 9 program types).
+396 lib + 49 vortex-cuda-backend + 35 integration = **480 total (480 pass, 0 fail, 3 marked `#[ignore]` for benchmark/live-RPC opt-in)** covering: M31/CM31/QM31 field arithmetic, Circle NTT, Merkle tree (commit, auth paths, tiled, SoA4), FRI (fold, circle fold, deterministic), STARK prover + verifier (multiple sizes, tamper detection), Cairo VM (decoder, executor, Fibonacci, constraints, LogUp, range checks, instruction decomposition), Poseidon, Pedersen (Stark252 field, EC ops, GPU vs CPU), Bitwise (memory segment, trace generation, verifier native recompute against Fiat-Shamir-bound (x, y), prove/verify round-trip, tamper detection, 32-bit input acceptance, forged-row rejection), LogUp/RC soundness (memory table commitment, cancellation check, RC counts commitment), OODS quotient formula correctness, GPU constraint eval (bytecode VM, warp-cooperative), GPU leaf hashing (Blake2s, domain separation), CASM loader, Cairo hints (AllocSegment, AllocFelt252Dict, dict entry lifecycle, squash, U256InvModN with 7 comprehensive test vectors), Fiat-Shamir transcript ordering (12 commitment points), property tests (completeness, soundness, random mutations), cross-validation (reference VM comparison for 9 program types).
 
 ## Break This System
 
