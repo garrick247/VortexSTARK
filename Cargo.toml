@@ -88,6 +88,12 @@ forge-permute = []
 # EIf write-back invariants).  Macro dispatch in cuda/barycentric_eval.cu;
 # host shim in cuda/barycentric_eval_forge.cu.
 forge-barycentric = []
+# Route the Blake2s PoW grind kernel through the FORGE-emitted variant.
+# Source: forge/analysis/vortex_ntt/grind.fg
+# (22 proof obligations discharged, 0 user assumptions — Blake2s round
+# structure copy-paste-equivalent to merkle_hash_leaves.fg, plus a
+# 32-branch unrolled trailing_zeros_u32 chain).
+forge-grind = []
 
 [[bin]]
 name = "vortex-bench"

@@ -135,6 +135,13 @@ fn main() {
             cmd.args(["-DFORGE_BARYCENTRIC=1"]);
         }
 
+        // forge-grind feature: cuda/grind.cu's entry point routes to
+        // cuda_grind_pow_forge (FORGE-emitted Blake2s PoW grind, 22
+        // obligations discharged + 0 assumptions).
+        if env::var("CARGO_FEATURE_FORGE_GRIND").is_ok() {
+            cmd.args(["-DFORGE_GRIND=1"]);
+        }
+
         // On Windows, nvcc may reject newer MSVC/SDK versions as an unsupported host compiler.
         // Use an older MSVC (14.44 / VS 2022) and an older Windows SDK (22621) for CUDA
         // host compilation, which CUDA 13.x is known to support.

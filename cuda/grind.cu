@@ -11,6 +11,16 @@
 
 #include "include/blake2s.cuh"
 
+// FORGE grind wire-in: when `forge-grind` cargo feature is on, build.rs
+// defines FORGE_GRIND=1 and cuda_grind_pow routes to the proof-checked
+// FORGE host shim in cuda/grind_forge.cu (source forge/analysis/
+// vortex_ntt/grind.fg, 22 proof obligations + 0 assumptions).
+#ifdef FORGE_GRIND
+extern "C" void cuda_grind_pow_forge(
+    const uint32_t* prefixed_digest, uint64_t* result,
+    uint32_t pow_bits, uint64_t batch_offset, uint32_t n_threads);
+#endif
+
 // Each thread tries nonce = thread_global_id + batch_offset.
 // If found, atomically writes the nonce to result[0] (initially ~0ULL).
 __global__ void grind_pow_kernel(
@@ -88,11 +98,15 @@ void cuda_grind_pow(
     uint64_t batch_offset,
     uint32_t n_threads
 ) {
+#ifdef FORGE_GRIND
+    cuda_grind_pow_forge(prefixed_digest, result, pow_bits, batch_offset, n_threads);
+#else
     uint32_t threads_per_block = 256;
     uint32_t blocks = (n_threads + threads_per_block - 1) / threads_per_block;
     grind_pow_kernel<<<blocks, threads_per_block>>>(
         prefixed_digest, result, pow_bits, batch_offset, n_threads
     );
+#endif
 }
 
 } // extern "C"
