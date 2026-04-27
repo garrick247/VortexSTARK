@@ -104,6 +104,15 @@ fn main() {
             cmd.args(["-DFORGE_NTT=1"]);
         }
 
+        // forge-ntt-batch feature: the four circle_ntt_batch_layer_kernel
+        // launches inside cuda_circle_ntt_evaluate_batch /
+        // _interpolate_batch redirect to cuda_circle_ntt_batch_layer_forge
+        // (FORGE-emitted, accepts the **u32 column-pointer fan-out via a
+        // device-resident `forge_span_u32_t` array).
+        if env::var("CARGO_FEATURE_FORGE_NTT_BATCH").is_ok() {
+            cmd.args(["-DFORGE_NTT_BATCH=1"]);
+        }
+
         // forge-fri feature: cuda/fri.cu's fold_line_soa_kernel and
         // fold_circle_into_line_soa_kernel launches redirect to the
         // FORGE host shims (~7.8x faster on the hot FRI fold path).

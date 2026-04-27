@@ -25,6 +25,29 @@ extern "C" {
     circle_ntt_layer_kernel<<<(blocks), (threads)>>>((data), (tw), (li), (half_n), (fw))
 #endif
 
+// FORGE batched-NTT wire-in. The four circle_ntt_batch_layer_kernel
+// launches inside cuda_circle_ntt_evaluate_batch / _interpolate_batch
+// redirect to cuda_circle_ntt_batch_layer_forge. The FORGE shim takes
+// a uint32_t-of-columns count as `n` (full vector length) instead of
+// the kernel's `half_n`, and uploads its own per-column fat-pointer
+// array internally; we just forward `d_columns` and double half_n.
+#ifdef FORGE_NTT_BATCH
+extern "C" {
+    void cuda_circle_ntt_batch_layer_forge(
+        uint32_t* const* col_ptrs,
+        const uint32_t* twiddles,
+        uint32_t layer_idx,
+        uint32_t n,
+        uint32_t n_cols,
+        int forward);
+}
+#define LAUNCH_NTT_BATCH_LAYER(blocks, threads, cols, tw, li, half_n, n_cols, fw) \
+    cuda_circle_ntt_batch_layer_forge((cols), (tw), (li), (half_n) * 2u, (n_cols), (fw))
+#else
+#define LAUNCH_NTT_BATCH_LAYER(blocks, threads, cols, tw, li, half_n, n_cols, fw) \
+    circle_ntt_batch_layer_kernel<<<(blocks), (threads)>>>((cols), (tw), (li), (half_n), (n_cols), (fw))
+#endif
+
 // Forward butterfly: v0' = v0 + v1*t, v1' = v0 - v1*t
 __device__ __forceinline__ void butterfly(uint32_t& v0, uint32_t& v1, uint32_t t) {
     uint32_t tmp = m31_mul(v1, t);
@@ -281,7 +304,8 @@ void cuda_circle_ntt_evaluate_batch(
     uint32_t blocks = (total + threads - 1) / threads;
 
     for (int layer = (int)n_line_layers - 1; layer >= 0; layer--) {
-        circle_ntt_batch_layer_kernel<<<blocks, threads>>>(
+        LAUNCH_NTT_BATCH_LAYER(
+            blocks, threads,
             d_columns,
             d_twiddles + h_layer_offsets[layer],
             (uint32_t)(layer + 1),
@@ -289,8 +313,9 @@ void cuda_circle_ntt_evaluate_batch(
         );
     }
 
-    circle_ntt_batch_layer_kernel<<<blocks, threads>>>(
-        d_columns, d_circle_twids, 0, half_n, n_cols, 1
+    LAUNCH_NTT_BATCH_LAYER(
+        blocks, threads,
+        d_columns, d_circle_twids, 0u, half_n, n_cols, 1
     );
 
     cudaDeviceSynchronize();
@@ -311,12 +336,14 @@ void cuda_circle_ntt_interpolate_batch(
     uint32_t threads = 256;
     uint32_t blocks = (total + threads - 1) / threads;
 
-    circle_ntt_batch_layer_kernel<<<blocks, threads>>>(
-        d_columns, d_circle_itwids, 0, half_n, n_cols, 0
+    LAUNCH_NTT_BATCH_LAYER(
+        blocks, threads,
+        d_columns, d_circle_itwids, 0u, half_n, n_cols, 0
     );
 
     for (uint32_t layer = 0; layer < n_line_layers; layer++) {
-        circle_ntt_batch_layer_kernel<<<blocks, threads>>>(
+        LAUNCH_NTT_BATCH_LAYER(
+            blocks, threads,
             d_columns,
             d_itwiddles + h_layer_offsets[layer],
             layer + 1, half_n, n_cols, 0

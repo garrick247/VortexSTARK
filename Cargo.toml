@@ -47,6 +47,12 @@ forge-blake2s = []
 # public `cuda_circle_ntt_layer` shim. Batched (multi-column) NTT
 # paths still use the hand-written kernel.
 forge-ntt = []
+# Route the batched (multi-column SoA) Circle NTT butterfly layers
+# through the FORGE-emitted kernel via cuda_circle_ntt_batch_layer_forge
+# (cuda/circle_ntt_batch_forge.cu, source forge/analysis/vortex_ntt/
+# circle_ntt_batch.fg, 148 obligations). Wires the four batched kernel
+# launches in cuda_circle_ntt_evaluate_batch / _interpolate_batch.
+forge-ntt-batch = []
 # Route FRI fold kernels (fold_line_soa, fold_circle_into_line_soa)
 # through the FORGE-emitted variants. Sources:
 # forge/analysis/vortex_ntt/fri_fold_line.fg (193 obligations) and
