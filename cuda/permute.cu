@@ -13,6 +13,20 @@
 
 #include <cstdint>
 
+// FORGE permute wire-in: when `forge-permute` cargo feature is on,
+// build.rs defines FORGE_PERMUTE=1 and both extern "C" entry points
+// route to the proof-checked FORGE host shims in
+// cuda/permute_forge.cu (source forge/analysis/vortex_ntt/permute.fg,
+// 9 proof obligations discharged).
+#ifdef FORGE_PERMUTE
+extern "C" {
+    void cuda_permute_hc_to_canonic_brt_forge(
+        const uint32_t* src, uint32_t* dst, uint32_t n, uint32_t log_n);
+    void cuda_permute_canonic_brt_to_hc_natural_forge(
+        const uint32_t* src, uint32_t* dst, uint32_t n, uint32_t log_n);
+}
+#endif
+
 __global__ void permute_hc_to_canonic_brt_kernel(
     const uint32_t* __restrict__ src,
     uint32_t* __restrict__ dst,
@@ -50,9 +64,13 @@ void cuda_permute_hc_to_canonic_brt(
     uint32_t n,
     uint32_t log_n
 ) {
+#ifdef FORGE_PERMUTE
+    cuda_permute_hc_to_canonic_brt_forge(src, dst, n, log_n);
+#else
     uint32_t threads = 256;
     uint32_t blocks = (n + threads - 1u) / threads;
     permute_hc_to_canonic_brt_kernel<<<blocks, threads>>>(src, dst, n, log_n);
+#endif
 }
 
 void cuda_permute_canonic_brt_to_hc_natural(
@@ -61,9 +79,13 @@ void cuda_permute_canonic_brt_to_hc_natural(
     uint32_t n,
     uint32_t log_n
 ) {
+#ifdef FORGE_PERMUTE
+    cuda_permute_canonic_brt_to_hc_natural_forge(src, dst, n, log_n);
+#else
     uint32_t threads = 256;
     uint32_t blocks = (n + threads - 1u) / threads;
     permute_canonic_brt_to_hc_natural_kernel<<<blocks, threads>>>(src, dst, n, log_n);
+#endif
 }
 
 } // extern "C"

@@ -120,6 +120,13 @@ fn main() {
             cmd.args(["-DFORGE_FRI=1"]);
         }
 
+        // forge-permute feature: cuda/permute.cu's hc-natural ↔ canonic-BRT
+        // entry points route to cuda_permute_*_forge (FORGE-emitted host
+        // shims, 9 obligations discharged).
+        if env::var("CARGO_FEATURE_FORGE_PERMUTE").is_ok() {
+            cmd.args(["-DFORGE_PERMUTE=1"]);
+        }
+
         // On Windows, nvcc may reject newer MSVC/SDK versions as an unsupported host compiler.
         // Use an older MSVC (14.44 / VS 2022) and an older Windows SDK (22621) for CUDA
         // host compilation, which CUDA 13.x is known to support.

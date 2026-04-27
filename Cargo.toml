@@ -76,6 +76,11 @@ forge-bit-reverse = []
 # check the indexed load — host already knows that length, so the
 # only Rust-side change is passing self.buf.len() as src_len.
 forge-gather = []
+# Route the two circle-domain permute kernels (hc-natural ↔ canonic-BRT
+# scatter) through the FORGE-emitted variants. Source:
+# forge/analysis/vortex_ntt/permute.fg (9 proof obligations).
+# Macro dispatch in cuda/permute.cu, host shims in cuda/permute_forge.cu.
+forge-permute = []
 
 [[bin]]
 name = "vortex-bench"
