@@ -359,6 +359,7 @@ unsafe extern "C" {
 
     /// FORGE-emitted FRI fold_circle_into_line_soa. Source:
     /// forge/analysis/vortex_ntt/fri_fold_circle.fg (237 obligations).
+    #[cfg(not(feature = "open-toolchain"))]
     pub fn cuda_fold_circle_into_line_soa_forge(
         dst0: *mut u32, dst1: *mut u32, dst2: *mut u32, dst3: *mut u32,
         src0: *const u32, src1: *const u32, src2: *const u32, src3: *const u32,
@@ -373,6 +374,7 @@ unsafe extern "C" {
     /// generated from forge/analysis/vortex_ntt/circle_ntt_layer.fg
     /// (138 proof obligations). `forward != 0` selects the forward
     /// butterfly; `forward == 0` selects the inverse.
+    #[cfg(not(feature = "open-toolchain"))]
     pub fn cuda_circle_ntt_layer_forge(
         data: *mut u32, twiddles: *const u32,
         layer_idx: u32, n: u32, forward: i32,
@@ -1003,6 +1005,8 @@ unsafe extern "C" {
     /// Generated from forge/analysis/vortex_ntt/batch_inverse.fg
     /// (160 proof obligations including m31_inv termination + the
     /// prefix-product loop invariants).
+    /// (Always nvcc-compiled — OpenCUDA mis-lowers __ldg(&local) into
+    /// ld.global.nc from a .local address, causing illegalAddress.)
     pub fn cuda_batch_inverse_m31_forge(
         input: *const u32, output: *mut u32, n: u32,
     );
@@ -1344,24 +1348,115 @@ pub mod open_toolchain {
         }
     }
 
-    // Other 6 of the 8 BYTE_MATCH kernels are NOT wired:
-    //   - batch_inverse_m31, circle_ntt_layer (fwd/inv), fri_fold_circle:
-    //     attempted, cubin BYTE_MATCHES ptxas exactly, but the Rust
-    //     launch returns cudaErrorIllegalAddress.  Root cause unknown;
-    //     likely arg-layout subtlety with kernels using local memory or
-    //     multi-launch dispatch.  Reverted from build.rs.
-    //   - circle_ntt_batch_layer: span-of-spans + multi-launch
-    //     orchestrator.  Out of scope for the proof-of-concept.
-    //   - permute_*, barycentric_eval, grind_pow: dispatched from C-side
-    //     macros (FORGE_NTT/FORGE_FRI in cuda/circle_ntt.cu, cuda/fri.cu).
-    //     C-side refactor required.
+    // ─── batch_inverse_m31 — NOT WIRED ─────────────────────────────────
+    // OpenCUDA mis-lowers `__ldg((const uint32_t*)&input.data[idx])`:
+    // it materializes the indexed value into a .local temp, then emits
+    // `ld.global.nc` reading FROM the local-mem pointer.  Result is
+    // cudaErrorIllegalAddress at runtime.  Verified by examining the
+    // OpenCUDA-emitted PTX in batch_inverse_forge.ptx — the working
+    // pattern is `add.u64 %rd_ptr, %rd_data, %rd_offset; ld.global.nc
+    // [%rd_ptr]`, but OpenCUDA emits an extra `st.local + ld.global.nc
+    // [%rd_local_addr]` round-trip instead.  This is the only kernel
+    // among the 9 BYTE_MATCH wrappers that uses `__ldg`; the bug is
+    // OpenCUDA-frontend-only and must be fixed there.
 
-    // ─── circle_ntt_layer (forward + inverse) — DEFERRED ───────────────
-    // Cubin BYTE_MATCHES ptxas exactly, but cuLaunchKernel returns
-    // cudaErrorIllegalAddress at runtime.  Root cause unknown
-    // (compare to fold_line_soa which uses the same launch shape and
-    // succeeds).  Stays nvcc-compiled until investigation completes.
-    // See project_fb1_status.md.
+    // ─── fri_fold_circle_into_line_soa ─────────────────────────────────
+    static CUBIN_FOLD_CIRCLE: &[u8] = cubin!("fold_circle_into_line_soa");
+    static H_FOLD_CIRCLE: OnceLock<(usize, usize)> = OnceLock::new();
+
+    pub unsafe fn cuda_fold_circle_into_line_soa_forge(
+        dst0: *mut u32, dst1: *mut u32, dst2: *mut u32, dst3: *mut u32,
+        src0: *const u32, src1: *const u32, src2: *const u32, src3: *const u32,
+        twiddles: *const u32,
+        alpha: *const u32, alpha_sq: *const u32, half_n: u32,
+    ) {
+        if half_n == 0 { return; }
+        let func = ensure_loaded(CUBIN_FOLD_CIRCLE, b"fold_circle_into_line_soa\0",
+                                  &H_FOLD_CIRCLE, "fold_circle_into_line_soa");
+        let dst_len: u64 = half_n as u64;
+        let src_len: u64 = (half_n as u64) * 2;
+        let tw_len:  u64 = half_n as u64;
+        let a_d0_d: u64 = dst0 as u64; let a_d0_l: u64 = dst_len;
+        let a_d1_d: u64 = dst1 as u64; let a_d1_l: u64 = dst_len;
+        let a_d2_d: u64 = dst2 as u64; let a_d2_l: u64 = dst_len;
+        let a_d3_d: u64 = dst3 as u64; let a_d3_l: u64 = dst_len;
+        let a_s0_d: u64 = src0 as u64; let a_s0_l: u64 = src_len;
+        let a_s1_d: u64 = src1 as u64; let a_s1_l: u64 = src_len;
+        let a_s2_d: u64 = src2 as u64; let a_s2_l: u64 = src_len;
+        let a_s3_d: u64 = src3 as u64; let a_s3_l: u64 = src_len;
+        let a_tw_d: u64 = twiddles as u64; let a_tw_l: u64 = tw_len;
+        let alpha_arr = unsafe { std::slice::from_raw_parts(alpha, 4) };
+        let alpha_sq_arr = unsafe { std::slice::from_raw_parts(alpha_sq, 4) };
+        let a_a_a: u32 = alpha_arr[0]; let a_a_b: u32 = alpha_arr[1];
+        let a_a_c: u32 = alpha_arr[2]; let a_a_d: u32 = alpha_arr[3];
+        let a_sq_a: u32 = alpha_sq_arr[0]; let a_sq_b: u32 = alpha_sq_arr[1];
+        let a_sq_c: u32 = alpha_sq_arr[2]; let a_sq_d: u32 = alpha_sq_arr[3];
+        let a_half_n: u64 = half_n as u64;
+        let mut args: [*mut c_void; 27] = [
+            &a_d0_d as *const _ as *mut c_void, &a_d0_l as *const _ as *mut c_void,
+            &a_d1_d as *const _ as *mut c_void, &a_d1_l as *const _ as *mut c_void,
+            &a_d2_d as *const _ as *mut c_void, &a_d2_l as *const _ as *mut c_void,
+            &a_d3_d as *const _ as *mut c_void, &a_d3_l as *const _ as *mut c_void,
+            &a_s0_d as *const _ as *mut c_void, &a_s0_l as *const _ as *mut c_void,
+            &a_s1_d as *const _ as *mut c_void, &a_s1_l as *const _ as *mut c_void,
+            &a_s2_d as *const _ as *mut c_void, &a_s2_l as *const _ as *mut c_void,
+            &a_s3_d as *const _ as *mut c_void, &a_s3_l as *const _ as *mut c_void,
+            &a_tw_d as *const _ as *mut c_void, &a_tw_l as *const _ as *mut c_void,
+            &a_a_a as *const _ as *mut c_void, &a_a_b as *const _ as *mut c_void,
+            &a_a_c as *const _ as *mut c_void, &a_a_d as *const _ as *mut c_void,
+            &a_sq_a as *const _ as *mut c_void, &a_sq_b as *const _ as *mut c_void,
+            &a_sq_c as *const _ as *mut c_void, &a_sq_d as *const _ as *mut c_void,
+            &a_half_n as *const _ as *mut c_void,
+        ];
+        let threads: u32 = 256;
+        let blocks = (half_n + threads - 1) / threads;
+        unsafe {
+            launch(func, (blocks, 1, 1), (threads, 1, 1),
+                   &mut args, "fold_circle_into_line_soa");
+        }
+    }
+
+    // ─── circle_ntt_layer (forward + inverse) ──────────────────────────
+    static CUBIN_CNTT_FWD: &[u8] = cubin!("circle_ntt_layer_forward");
+    static CUBIN_CNTT_INV: &[u8] = cubin!("circle_ntt_layer_inverse");
+    static H_CNTT_FWD: OnceLock<(usize, usize)> = OnceLock::new();
+    static H_CNTT_INV: OnceLock<(usize, usize)> = OnceLock::new();
+
+    pub unsafe fn cuda_circle_ntt_layer_forge(
+        data: *mut u32, twiddles: *const u32,
+        layer_idx: u32, n: u32, forward: i32,
+    ) {
+        if n < 2 { return; }
+        let half_n: u32 = n / 2;
+        let (cubin, handles, name): (&'static [u8], &OnceLock<(usize, usize)>, &'static [u8]) =
+            if forward != 0 {
+                (CUBIN_CNTT_FWD, &H_CNTT_FWD, b"circle_ntt_layer_forward\0")
+            } else {
+                (CUBIN_CNTT_INV, &H_CNTT_INV, b"circle_ntt_layer_inverse\0")
+            };
+        let diag = if forward != 0 { "circle_ntt_layer_forward" }
+                   else { "circle_ntt_layer_inverse" };
+        let func = ensure_loaded(cubin, name, handles, diag);
+        let a_data_ptr: u64 = data as u64;
+        let a_data_len: u64 = n as u64;
+        let a_tw_ptr:   u64 = twiddles as u64;
+        let a_tw_len:   u64 = half_n as u64;
+        let a_layer:    u32 = layer_idx;
+        let a_half_n:   u64 = half_n as u64;
+        let mut args: [*mut c_void; 6] = [
+            &a_data_ptr as *const _ as *mut c_void,
+            &a_data_len as *const _ as *mut c_void,
+            &a_tw_ptr   as *const _ as *mut c_void,
+            &a_tw_len   as *const _ as *mut c_void,
+            &a_layer    as *const _ as *mut c_void,
+            &a_half_n   as *const _ as *mut c_void,
+        ];
+        let threads: u32 = 256;
+        let blocks = (half_n + threads - 1) / threads;
+        unsafe {
+            launch(func, (blocks, 1, 1), (threads, 1, 1), &mut args, diag);
+        }
+    }
 
     // ─── fri_fold_line_soa ─────────────────────────────────────────────
     static CUBIN_FOLD_LINE: &[u8] = cubin!("fold_line_soa");
@@ -1444,6 +1539,28 @@ pub unsafe extern "C" fn cuda_bit_reverse_qm31_forge(
     unsafe {
         open_toolchain::cuda_bit_reverse_qm31_forge(in_buf, out_buf, n, log_n)
     }
+}
+
+#[cfg(feature = "open-toolchain")]
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn cuda_circle_ntt_layer_forge(
+    data: *mut u32, twiddles: *const u32, layer_idx: u32, n: u32, forward: i32,
+) {
+    unsafe { open_toolchain::cuda_circle_ntt_layer_forge(
+        data, twiddles, layer_idx, n, forward) }
+}
+
+#[cfg(feature = "open-toolchain")]
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn cuda_fold_circle_into_line_soa_forge(
+    dst0: *mut u32, dst1: *mut u32, dst2: *mut u32, dst3: *mut u32,
+    src0: *const u32, src1: *const u32, src2: *const u32, src3: *const u32,
+    twiddles: *const u32,
+    alpha: *const u32, alpha_sq: *const u32, half_n: u32,
+) {
+    unsafe { open_toolchain::cuda_fold_circle_into_line_soa_forge(
+        dst0, dst1, dst2, dst3, src0, src1, src2, src3, twiddles,
+        alpha, alpha_sq, half_n) }
 }
 
 #[cfg(feature = "open-toolchain")]
