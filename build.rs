@@ -83,61 +83,91 @@ fn main() {
     let mut objects = Vec::new();
 
     // FB-1 open toolchain: when the `open-toolchain` feature is on, build
-    // the bit_reverse_qm31 cubin via OpenCUDA + OpenPTXas (the open-source
-    // pipeline, no nvcc/ptxas) and skip nvcc compilation of the host shim
-    // for that kernel — the Rust side at src/cuda/ffi.rs replaces it with
-    // a cuModuleLoadData + cuLaunchKernel launcher.
+    // a set of FORGE kernel cubins via OpenCUDA + OpenPTXas (the open-source
+    // pipeline, no nvcc/ptxas) and skip nvcc compilation of their host
+    // shims — the Rust side at src/cuda/ffi.rs replaces them with
+    // cuModuleLoadData + cuLaunchKernel launchers.
     let open_toolchain = env::var("CARGO_FEATURE_OPEN_TOOLCHAIN").is_ok();
-    let open_toolchain_skip_files: &[&str] = if open_toolchain {
-        &["bit_reverse_qm31_forge.cu"]
+
+    // (host_shim_filename, list of (kernel_name, cubin_basename)).  Each
+    // entry's host shim is skipped from the nvcc set; each kernel name
+    // becomes a separate <name>.cubin in $OUT_DIR.  Multi-kernel files
+    // (permute, circle_ntt_layer) yield multiple cubins from one wrapper.
+    // Only kernels whose host-shim FFI symbol is called from Rust are
+    // wired here.  permute_*_forge / barycentric_eval_forge / grind_pow_forge
+    // are dispatched from C-side macros (cuda/permute.cu, cuda/barycentric_eval.cu,
+    // cuda/grind.cu) — replacing them requires editing those macros to call
+    // Rust, separate scope.  circle_ntt_batch_forge is also deferred: it
+    // uses span-of-spans (forge_span_span_u32_t) and orchestrates
+    // multi-launch loops with cudaMalloc/cudaMemcpy in C++, which would
+    // need a substantive Rust translation.
+    let open_toolchain_kernels: &[(&str, &[&str])] = if open_toolchain {
+        &[
+            ("bit_reverse_qm31_forge.cu",  &["bit_reverse_qm31"]),
+            ("fri_fold_line_forge.cu",     &["fold_line_soa"]),
+        ]
     } else {
         &[]
     };
+    let open_toolchain_skip_files: Vec<&str> =
+        open_toolchain_kernels.iter().map(|(f, _)| *f).collect();
+
     if open_toolchain {
         let opencuda_root = PathBuf::from(r"C:\Users\kraken\opencuda");
         let openptxas_root = PathBuf::from(r"C:\Users\kraken\openptxas");
         let cuda_include = PathBuf::from("cuda/include").canonicalize()
             .unwrap_or_else(|_| PathBuf::from("cuda/include"));
-        let forge_wrapper = PathBuf::from(r"cuda/forge/bit_reverse_qm31_forge.cu")
-            .canonicalize()
-            .expect("cuda/forge/bit_reverse_qm31_forge.cu must exist");
-        let ptx_path = out_dir.join("bit_reverse_qm31.ptx");
-        let cubin_path = out_dir.join("bit_reverse_qm31.cubin");
+        for (wrapper_name, kernel_names) in open_toolchain_kernels {
+            let forge_wrapper = PathBuf::from(format!("cuda/forge/{}", wrapper_name))
+                .canonicalize()
+                .unwrap_or_else(|_| panic!("cuda/forge/{} must exist", wrapper_name));
+            let stem = wrapper_name.trim_end_matches(".cu");
+            let ptx_path = out_dir.join(format!("{}.ptx", stem));
 
-        // Step 1: OpenCUDA (CUDA C → PTX).
-        let r = Command::new("python")
-            .args(["-m", "opencuda", forge_wrapper.to_str().unwrap(),
-                   "--emit-ptx", "--out", ptx_path.to_str().unwrap(),
-                   "-I", cuda_include.to_str().unwrap()])
-            .current_dir(&opencuda_root)
-            .status()
-            .expect("python -m opencuda must run; ensure Python is on PATH");
-        assert!(r.success(),
-                "OpenCUDA failed on {}", forge_wrapper.display());
+            // Step 1: OpenCUDA (CUDA C → PTX).
+            let r = Command::new("python")
+                .args(["-m", "opencuda", forge_wrapper.to_str().unwrap(),
+                       "--emit-ptx", "--out", ptx_path.to_str().unwrap(),
+                       "-I", cuda_include.to_str().unwrap()])
+                .current_dir(&opencuda_root)
+                .status()
+                .expect("python -m opencuda must run; ensure Python is on PATH");
+            assert!(r.success(),
+                    "OpenCUDA failed on {}", forge_wrapper.display());
 
-        // Step 2: OpenPTXas (PTX → cubin) via a small in-line Python.
-        let openptxas_cmd = format!(
-            "import sys; sys.path.insert(0, r'{}'); \
-             from sass.pipeline import compile_ptx_source; \
-             ptx = open(r'{}').read(); \
-             cubin = list(compile_ptx_source(ptx).values())[0]; \
-             open(r'{}', 'wb').write(cubin)",
-            openptxas_root.display(),
-            ptx_path.display(),
-            cubin_path.display(),
-        );
-        let r = Command::new("python")
-            .args(["-c", &openptxas_cmd])
-            .status()
-            .expect("python (OpenPTXas pipeline) must run");
-        assert!(r.success(), "OpenPTXas compilation of bit_reverse_qm31.ptx failed");
-        assert!(cubin_path.exists(),
-                "OpenPTXas produced no cubin at {}", cubin_path.display());
+            // Step 2: OpenPTXas (PTX → cubin per kernel).  compile_ptx_source
+            // returns dict[kernel_name -> cubin_bytes] for multi-entry PTX.
+            for kernel_name in *kernel_names {
+                let cubin_path = out_dir.join(format!("{}.cubin", kernel_name));
+                let openptxas_cmd = format!(
+                    "import sys; sys.path.insert(0, r'{}'); \
+                     from sass.pipeline import compile_ptx_source; \
+                     ptx = open(r'{}').read(); \
+                     cubins = compile_ptx_source(ptx); \
+                     open(r'{}', 'wb').write(cubins[r'{}'])",
+                    openptxas_root.display(),
+                    ptx_path.display(),
+                    cubin_path.display(),
+                    kernel_name,
+                );
+                let r = Command::new("python")
+                    .args(["-c", &openptxas_cmd])
+                    .status()
+                    .expect("python (OpenPTXas pipeline) must run");
+                assert!(r.success(),
+                        "OpenPTXas compilation of {} (kernel {}) failed",
+                        ptx_path.display(), kernel_name);
+                assert!(cubin_path.exists(),
+                        "OpenPTXas produced no cubin at {}", cubin_path.display());
+            }
 
-        // Expose the OUT_DIR path so src/cuda/ffi.rs can include_bytes! it.
+            // Re-run when the FORGE wrapper changes.
+            println!("cargo:rerun-if-changed={}", forge_wrapper.display());
+        }
+
+        // Expose the OUT_DIR path so src/cuda/ffi.rs can include_bytes! cubins.
         println!("cargo:rustc-env=OPEN_TOOLCHAIN_CUBIN_DIR={}", out_dir.display());
-        // Re-run when the FORGE wrapper or OpenCUDA / OpenPTXas source moves.
-        println!("cargo:rerun-if-changed={}", forge_wrapper.display());
+        // Re-run when OpenCUDA / OpenPTXas source moves.
         println!("cargo:rerun-if-changed={}", opencuda_root.join("opencuda").display());
         println!("cargo:rerun-if-changed={}", openptxas_root.join("sass").display());
     }
