@@ -105,6 +105,19 @@ forge-barycentric = []
 # structure copy-paste-equivalent to merkle_hash_leaves.fg, plus a
 # 32-branch unrolled trailing_zeros_u32 chain).
 forge-grind = []
+# FB-1 open toolchain: when combined with `forge-bit-reverse`, route the
+# QM31 bit-reverse FORGE kernel through OpenCUDA + OpenPTXas instead of
+# nvcc.  build.rs invokes the open-source toolchain to produce a cubin
+# (no NVIDIA closed-source compiler in the path), embeds it via
+# include_bytes!, and the FFI shim at src/cuda/ffi.rs loads it via
+# cuModuleLoadData and launches via cuLaunchKernel against the runtime
+# API's primary context (cuDevicePrimaryCtxRetain).  Requires Python on
+# PATH at build time with the openptxas + opencuda repos available at
+# C:\Users\kraken\openptxas and C:\Users\kraken\opencuda.
+#
+# Proof-of-concept scope: only `cuda_bit_reverse_qm31_forge` is rerouted.
+# Other FORGE kernels stay nvcc-compiled.  See project_fb1_status.md.
+open-toolchain = []
 
 [[bin]]
 name = "vortex-bench"

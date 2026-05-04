@@ -986,6 +986,12 @@ unsafe extern "C" {
     /// from forge/analysis/vortex_ntt/bit_reverse_qm31.fg
     /// (12 proof obligations including bounded-loop termination on
     /// the bit-reverse inner loop).
+    ///
+    /// Under `--features open-toolchain`, this symbol is replaced by a
+    /// Rust shim (defined below) that loads an OpenCUDA+OpenPTXas-built
+    /// cubin via cuModuleLoadData and launches via cuLaunchKernel — no
+    /// nvcc/ptxas compilation in the build path for this kernel.
+    #[cfg(not(feature = "open-toolchain"))]
     pub fn cuda_bit_reverse_qm31_forge(
         in_buf: *const u32, out_buf: *mut u32, n: u32, log_n: u32,
     );
@@ -1185,4 +1191,162 @@ unsafe extern "C" {
         batch_offset: u64,
         n_threads: u32,
     );
+}
+
+// ─── FB-1 open toolchain ─────────────────────────────────────────────────
+// CUDA driver-API bindings + Rust shim that replaces the FORGE
+// `cuda_bit_reverse_qm31_forge` symbol when the `open-toolchain` feature
+// is enabled.  The kernel is built at compile time via OpenCUDA +
+// OpenPTXas (see build.rs) and embedded as a static byte array.  At
+// first call, we cuModuleLoadData against the runtime API's primary
+// context and cache the CUmodule + CUfunction handles for life-of-process.
+//
+// Driver-API symbols are linked from libcuda (the CUDA driver, not the
+// runtime) — same library the existing cudaMalloc / cudaMemcpy resolve
+// through indirectly.  No new crate dependencies.
+
+#[cfg(feature = "open-toolchain")]
+unsafe extern "C" {
+    fn cuModuleLoadData(module: *mut *mut c_void, image: *const c_void) -> i32;
+    fn cuModuleGetFunction(
+        hfunc: *mut *mut c_void, hmod: *mut c_void, name: *const std::ffi::c_char,
+    ) -> i32;
+    fn cuLaunchKernel(
+        f: *mut c_void,
+        grid_x: u32, grid_y: u32, grid_z: u32,
+        block_x: u32, block_y: u32, block_z: u32,
+        shared_mem_bytes: u32,
+        stream: *mut c_void,
+        kernel_params: *mut *mut c_void,
+        extra: *mut *mut c_void,
+    ) -> i32;
+    fn cuDevicePrimaryCtxRetain(ctx: *mut *mut c_void, dev: i32) -> i32;
+    fn cuCtxSetCurrent(ctx: *mut c_void) -> i32;
+}
+
+#[cfg(feature = "open-toolchain")]
+pub mod open_toolchain {
+    //! Rust-side launcher for FORGE kernels built via OpenCUDA + OpenPTXas.
+    //!
+    //! The cubin is embedded at compile time from `OPEN_TOOLCHAIN_CUBIN_DIR`
+    //! (set by build.rs).  First call to any kernel here triggers a one-time
+    //! `cuModuleLoadData` against the CUDA runtime's primary context, so
+    //! GPU pointers from `cudaMalloc` are valid here too.
+    use std::ffi::c_void;
+    use std::sync::OnceLock;
+
+    static CUBIN_BIT_REVERSE_QM31: &[u8] = include_bytes!(concat!(
+        env!("OPEN_TOOLCHAIN_CUBIN_DIR"),
+        "/bit_reverse_qm31.cubin"
+    ));
+
+    /// Cached (CUmodule, CUfunction) for `bit_reverse_qm31` — initialized
+    /// on first call.
+    static BIT_REVERSE_HANDLES: OnceLock<(usize, usize)> = OnceLock::new();
+
+    fn ensure_bit_reverse_loaded() -> (*mut c_void, *mut c_void) {
+        let (mod_addr, func_addr) = *BIT_REVERSE_HANDLES.get_or_init(|| unsafe {
+            // Bind the runtime API's primary context to the calling thread.
+            // GPU memory allocated via cudaMalloc lives in this context;
+            // launching against a different context would see invalid ptrs.
+            let mut ctx: *mut c_void = std::ptr::null_mut();
+            let rc = super::cuDevicePrimaryCtxRetain(&mut ctx, 0);
+            assert!(rc == 0,
+                    "cuDevicePrimaryCtxRetain failed: {rc}");
+            let rc = super::cuCtxSetCurrent(ctx);
+            assert!(rc == 0, "cuCtxSetCurrent failed: {rc}");
+
+            let mut module: *mut c_void = std::ptr::null_mut();
+            let rc = super::cuModuleLoadData(
+                &mut module,
+                CUBIN_BIT_REVERSE_QM31.as_ptr() as *const c_void,
+            );
+            assert!(rc == 0,
+                    "cuModuleLoadData(bit_reverse_qm31) failed: {rc}");
+
+            let mut func: *mut c_void = std::ptr::null_mut();
+            let rc = super::cuModuleGetFunction(
+                &mut func, module,
+                b"bit_reverse_qm31\0".as_ptr() as *const std::ffi::c_char,
+            );
+            assert!(rc == 0,
+                    "cuModuleGetFunction(bit_reverse_qm31) failed: {rc}");
+            (module as usize, func as usize)
+        });
+        (mod_addr as *mut c_void, func_addr as *mut c_void)
+    }
+
+    /// Open-toolchain replacement for the nvcc-compiled
+    /// `cuda_bit_reverse_qm31_forge`.  Same signature, same semantics —
+    /// just routed through OpenCUDA → OpenPTXas → cuModuleLoadData →
+    /// cuLaunchKernel.  Mirrors the host shim at
+    /// cuda/bit_reverse_qm31_forge.cu lines 12-24 (grid/block, span ABI,
+    /// argument order).
+    ///
+    /// Argument layout (post struct-by-value flattening per OpenCUDA's
+    /// param ABI fix in opencuda commit 0e1e621):
+    ///   .param .u64 in_buf_data, .param .u64 in_buf_len,   // u32 count
+    ///   .param .u64 out_buf_data, .param .u64 out_buf_len, // u32 count
+    ///   .param .u64 n,            .param .u32 log_n
+    ///
+    /// SAFETY: caller-passed pointers must be valid GPU device addresses
+    /// in the current CUDA primary context (allocated via cudaMalloc).
+    /// `n` must equal the QM31 element count (each QM31 = 4 u32).
+    pub unsafe fn cuda_bit_reverse_qm31_forge(
+        in_buf: *const u32, out_buf: *mut u32, n: u32, log_n: u32,
+    ) {
+        if n == 0 {
+            return;
+        }
+        let (_module, func) = ensure_bit_reverse_loaded();
+
+        // Flatten the two `forge_span_u32_t` structs into 4 separate u64
+        // parameters.  `len` is the u32 element count (= n * 4 since each
+        // QM31 has 4 u32s), matching the host shim at
+        // cuda/bit_reverse_qm31_forge.cu line 21: `(uintptr_t)n * 4u`.
+        let in_buf_data: u64 = in_buf as u64;
+        let in_buf_len: u64 = (n as u64) * 4;
+        let out_buf_data: u64 = out_buf as u64;
+        let out_buf_len: u64 = (n as u64) * 4;
+        let n_u64: u64 = n as u64;
+        let log_n_u32: u32 = log_n;
+
+        let mut args: [*mut c_void; 6] = [
+            &in_buf_data as *const u64 as *mut c_void,
+            &in_buf_len as *const u64 as *mut c_void,
+            &out_buf_data as *const u64 as *mut c_void,
+            &out_buf_len as *const u64 as *mut c_void,
+            &n_u64 as *const u64 as *mut c_void,
+            &log_n_u32 as *const u32 as *mut c_void,
+        ];
+
+        let threads: u32 = 256;
+        let blocks: u32 = (n + threads - 1) / threads;
+
+        unsafe {
+            let rc = super::cuLaunchKernel(
+                func,
+                blocks, 1, 1,
+                threads, 1, 1,
+                0,
+                std::ptr::null_mut(),
+                args.as_mut_ptr(),
+                std::ptr::null_mut(),
+            );
+            assert!(rc == 0,
+                    "cuLaunchKernel(bit_reverse_qm31) failed: {rc}");
+        }
+    }
+}
+
+/// Open-toolchain shim for `cuda_bit_reverse_qm31_forge` — same signature
+/// as the nvcc-compiled extern, dispatches to the cuModuleLoad-based
+/// launcher.  Callers in src/blake2s_m31.rs etc. don't need to change.
+#[cfg(feature = "open-toolchain")]
+pub unsafe fn cuda_bit_reverse_qm31_forge(
+    in_buf: *const u32, out_buf: *mut u32, n: u32, log_n: u32,
+) {
+    unsafe {
+        open_toolchain::cuda_bit_reverse_qm31_forge(in_buf, out_buf, n, log_n)
+    }
 }

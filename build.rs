@@ -82,8 +82,75 @@ fn main() {
     let obj_ext = if is_windows { "obj" } else { "o" };
     let mut objects = Vec::new();
 
+    // FB-1 open toolchain: when the `open-toolchain` feature is on, build
+    // the bit_reverse_qm31 cubin via OpenCUDA + OpenPTXas (the open-source
+    // pipeline, no nvcc/ptxas) and skip nvcc compilation of the host shim
+    // for that kernel — the Rust side at src/cuda/ffi.rs replaces it with
+    // a cuModuleLoadData + cuLaunchKernel launcher.
+    let open_toolchain = env::var("CARGO_FEATURE_OPEN_TOOLCHAIN").is_ok();
+    let open_toolchain_skip_files: &[&str] = if open_toolchain {
+        &["bit_reverse_qm31_forge.cu"]
+    } else {
+        &[]
+    };
+    if open_toolchain {
+        let opencuda_root = PathBuf::from(r"C:\Users\kraken\opencuda");
+        let openptxas_root = PathBuf::from(r"C:\Users\kraken\openptxas");
+        let cuda_include = PathBuf::from("cuda/include").canonicalize()
+            .unwrap_or_else(|_| PathBuf::from("cuda/include"));
+        let forge_wrapper = PathBuf::from(r"cuda/forge/bit_reverse_qm31_forge.cu")
+            .canonicalize()
+            .expect("cuda/forge/bit_reverse_qm31_forge.cu must exist");
+        let ptx_path = out_dir.join("bit_reverse_qm31.ptx");
+        let cubin_path = out_dir.join("bit_reverse_qm31.cubin");
+
+        // Step 1: OpenCUDA (CUDA C → PTX).
+        let r = Command::new("python")
+            .args(["-m", "opencuda", forge_wrapper.to_str().unwrap(),
+                   "--emit-ptx", "--out", ptx_path.to_str().unwrap(),
+                   "-I", cuda_include.to_str().unwrap()])
+            .current_dir(&opencuda_root)
+            .status()
+            .expect("python -m opencuda must run; ensure Python is on PATH");
+        assert!(r.success(),
+                "OpenCUDA failed on {}", forge_wrapper.display());
+
+        // Step 2: OpenPTXas (PTX → cubin) via a small in-line Python.
+        let openptxas_cmd = format!(
+            "import sys; sys.path.insert(0, r'{}'); \
+             from sass.pipeline import compile_ptx_source; \
+             ptx = open(r'{}').read(); \
+             cubin = list(compile_ptx_source(ptx).values())[0]; \
+             open(r'{}', 'wb').write(cubin)",
+            openptxas_root.display(),
+            ptx_path.display(),
+            cubin_path.display(),
+        );
+        let r = Command::new("python")
+            .args(["-c", &openptxas_cmd])
+            .status()
+            .expect("python (OpenPTXas pipeline) must run");
+        assert!(r.success(), "OpenPTXas compilation of bit_reverse_qm31.ptx failed");
+        assert!(cubin_path.exists(),
+                "OpenPTXas produced no cubin at {}", cubin_path.display());
+
+        // Expose the OUT_DIR path so src/cuda/ffi.rs can include_bytes! it.
+        println!("cargo:rustc-env=OPEN_TOOLCHAIN_CUBIN_DIR={}", out_dir.display());
+        // Re-run when the FORGE wrapper or OpenCUDA / OpenPTXas source moves.
+        println!("cargo:rerun-if-changed={}", forge_wrapper.display());
+        println!("cargo:rerun-if-changed={}", opencuda_root.join("opencuda").display());
+        println!("cargo:rerun-if-changed={}", openptxas_root.join("sass").display());
+    }
+
     for src in &cuda_sources {
         let stem = src.file_stem().unwrap().to_str().unwrap();
+        let src_basename = src.file_name().unwrap().to_str().unwrap();
+        if open_toolchain_skip_files.iter().any(|f| *f == src_basename) {
+            // open-toolchain replaces this host shim with a Rust-side
+            // cuLaunchKernel — skip nvcc compilation to avoid duplicate
+            // FFI symbol definitions at link time.
+            continue;
+        }
         let obj = out_dir.join(format!("{stem}.{obj_ext}"));
 
         let mut cmd = Command::new(&nvcc);
@@ -255,6 +322,14 @@ fn main() {
         println!("cargo:rustc-link-search=native={}", cuda_dir.join("lib64").display());
     }
     println!("cargo:rustc-link-lib=dylib=cudart");
+
+    // FB-1 open toolchain: also link the CUDA driver library so
+    // cuModuleLoadData / cuLaunchKernel / cuDevicePrimaryCtxRetain etc.
+    // resolve at link time.  The driver lib is `cuda` on both Windows
+    // (`cuda.lib` next to cudart.lib) and Linux (`libcuda.so`).
+    if open_toolchain {
+        println!("cargo:rustc-link-lib=dylib=cuda");
+    }
 
     // Also link stdc++ on Linux (CUDA runtime depends on it)
     if !is_windows {
