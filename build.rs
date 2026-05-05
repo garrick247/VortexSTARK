@@ -104,18 +104,14 @@ fn main() {
     let open_toolchain_kernels: &[(&str, &[&str])] = if open_toolchain {
         &[
             ("bit_reverse_qm31_forge.cu",  &["bit_reverse_qm31"]),
-            ("fri_fold_line_forge.cu",     &["fold_line_soa"]),
-            ("circle_ntt_layer_forge.cu",  &["circle_ntt_layer_forward",
-                                              "circle_ntt_layer_inverse"]),
-            ("fri_fold_circle_forge.cu",   &["fold_circle_into_line_soa"]),
-            // batch_inverse_m31 NOT wired: real OpenCUDA codegen bug.
-            // `__ldg((const uint32_t*)&input.data[start])` lowers to
-            // st.local + ld.global.nc from the local pointer (instead
-            // of just a direct ld.global.nc through input.data + offset).
-            // Result: ld.global.nc on a .local address → illegalAddress.
-            // Stays nvcc-compiled until the OpenCUDA frontend fixes the
-            // `__ldg(&array_index)` lowering.  This is the only kernel
-            // among the 9 BYTE_MATCH wrappers using __ldg.
+            ("batch_inverse_forge.cu",     &["batch_inverse_m31"]),
+            // fold_line_soa, circle_ntt_layer, fold_circle were
+            // attempted but produce silent miscompiles in cairo proofs
+            // (Line/Circle fold mismatch at query …) despite passing
+            // their gpu_forge parity tests.  The parity-test inputs
+            // don't exercise the buggy code paths.  Reverted; stays
+            // nvcc-compiled until the underlying OpenCUDA codegen
+            // difference is diagnosed.
         ]
     } else {
         &[]
