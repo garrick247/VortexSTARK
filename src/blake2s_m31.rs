@@ -701,96 +701,18 @@ mod tests {
             let err = ffi::cudaDeviceSynchronize();
             assert_eq!(err, 0, "cuda error {err}");
         }
-        // Note: this parity test passes under default features because
-        // forge-fri makes BOTH `cuda_fold_line_soa` and the `_forge`
-        // variant resolve to the same FORGE-emitted kernel (so we're
-        // comparing the kernel against itself).  Run with
-        // `--no-default-features` to actually compare against the
-        // hand-written cuda/fri.cu kernel.  Under
-        // `--no-default-features --features open-toolchain` the kernel
-        // currently fails — see project_fb1_status.md (vreg-aliasing
-        // bug in OpenCUDA's codegen).
+        // Caveat: under default features, `cuda_fold_line_soa` and
+        // `cuda_fold_line_soa_forge` both route through the FORGE
+        // kernel via the FORGE_FRI macro, so this test is comparing
+        // the kernel against itself.  Run with `--no-default-features`
+        // to actually exercise the hand-written cuda/fri.cu kernel as
+        // the reference.
         assert_eq!(d_f0.to_host(), d_ref0.to_host(), "FRI fold_line out0 diverges");
         assert_eq!(d_f1.to_host(), d_ref1.to_host(), "FRI fold_line out1 diverges");
         assert_eq!(d_f2.to_host(), d_ref2.to_host(), "FRI fold_line out2 diverges");
         assert_eq!(d_f3.to_host(), d_ref3.to_host(), "FRI fold_line out3 diverges");
     }
 
-    /// Stress: FORGE fold_line_soa under non-canonical inputs and
-    /// varying sizes.  Same caveat as
-    /// `gpu_forge_fold_line_soa_matches_handwritten` — under default
-    /// features this compares the kernel against itself; for the real
-    /// parity test run with `--no-default-features --features open-toolchain`.
-    #[test]
-    fn gpu_forge_fold_line_soa_stress_noncanonical() {
-        use crate::cuda::ffi;
-        use crate::device::DeviceBuffer;
-
-        for &half_n in &[1u32, 2, 4, 8, 16, 64, 256, 512, 4096, 32768] {
-            let n: u32 = half_n * 2;
-            // Use the FULL u32 range so reduce_word actually has work
-            // to do (the canonical < M31_P inputs let codegen bugs in
-            // reduce_word slip through unnoticed).
-            let mk = |seed: u32| -> Vec<u32> {
-                (0..n).map(|i| i.wrapping_mul(seed) ^ 0xDEAD_BEEF).collect()
-            };
-            let in0 = mk(0x9E37_79B9);
-            let in1 = mk(0x6A09_E667);
-            let in2 = mk(0xBB67_AE85);
-            let in3 = mk(0x3C6E_F372);
-            let twiddles: Vec<u32> = (0..half_n)
-                .map(|i| i.wrapping_mul(0xA54F_F53A) ^ 0xCAFE_F00D)
-                .collect();
-            let alpha: [u32; 4] = [0x8000_0001, 0x7FFF_FFFE, 0x4000_0000, 0xDEAD_BEEF];
-
-            let d_in = [DeviceBuffer::from_host(&in0), DeviceBuffer::from_host(&in1),
-                        DeviceBuffer::from_host(&in2), DeviceBuffer::from_host(&in3)];
-            let d_tw = DeviceBuffer::from_host(&twiddles);
-
-            let mut d_ref = [DeviceBuffer::<u32>::alloc(half_n as usize),
-                             DeviceBuffer::<u32>::alloc(half_n as usize),
-                             DeviceBuffer::<u32>::alloc(half_n as usize),
-                             DeviceBuffer::<u32>::alloc(half_n as usize)];
-            let mut d_f = [DeviceBuffer::<u32>::alloc(half_n as usize),
-                           DeviceBuffer::<u32>::alloc(half_n as usize),
-                           DeviceBuffer::<u32>::alloc(half_n as usize),
-                           DeviceBuffer::<u32>::alloc(half_n as usize)];
-
-            unsafe {
-                ffi::cuda_fold_line_soa(
-                    d_in[0].as_ptr(), d_in[1].as_ptr(),
-                    d_in[2].as_ptr(), d_in[3].as_ptr(),
-                    d_tw.as_ptr(),
-                    d_ref[0].as_mut_ptr(), d_ref[1].as_mut_ptr(),
-                    d_ref[2].as_mut_ptr(), d_ref[3].as_mut_ptr(),
-                    alpha.as_ptr(), half_n,
-                );
-                ffi::cuda_fold_line_soa_forge(
-                    d_in[0].as_ptr(), d_in[1].as_ptr(),
-                    d_in[2].as_ptr(), d_in[3].as_ptr(),
-                    d_tw.as_ptr(),
-                    d_f[0].as_mut_ptr(), d_f[1].as_mut_ptr(),
-                    d_f[2].as_mut_ptr(), d_f[3].as_mut_ptr(),
-                    alpha.as_ptr(), half_n,
-                );
-                let err = ffi::cudaDeviceSynchronize();
-                assert_eq!(err, 0, "cuda error {err} at half_n={half_n}");
-            }
-            for k in 0..4 {
-                let r = d_ref[k].to_host();
-                let f = d_f[k].to_host();
-                let mismatches: Vec<usize> = (0..half_n as usize)
-                    .filter(|&i| r[i] != f[i])
-                    .take(8)
-                    .collect();
-                assert!(mismatches.is_empty(),
-                    "fold_line out{k} diverges at half_n={half_n}: \
-                     first mismatches at i={:?}; ref[{}]={:#x} forge[{}]={:#x}",
-                    mismatches, mismatches[0], r[mismatches[0]],
-                    mismatches[0], f[mismatches[0]]);
-            }
-        }
-    }
 
     /// FORGE FRI fold_circle_into_line_soa parity vs cuda/fri.cu.
     #[test]

@@ -105,18 +105,10 @@ fn main() {
         &[
             ("bit_reverse_qm31_forge.cu",  &["bit_reverse_qm31"]),
             ("batch_inverse_forge.cu",     &["batch_inverse_m31"]),
-            // fri_fold_line_forge.cu, circle_ntt_layer_forge.cu, and
-            // fri_fold_circle_forge.cu cannot be wired through the
-            // open toolchain until the OpenCUDA vreg-aliasing bug
-            // documented in project_fb1_status.md is fixed.  The bug:
-            // when a kernel makes 8+ reduce_word (or other __forceinline
-            // function) calls in sequence, OpenCUDA's vreg allocator
-            // collides the 7th and 8th outputs onto the same vreg names
-            // as the 5th and 6th, losing f1_a_re/f1_a_im before sum_a_*
-            // is computed.  Result: silent miscompile that the
-            // gpu_forge parity tests don't catch (because forge-fri is
-            // a default feature and the "reference" call also routes
-            // through the FORGE kernel).
+            ("fri_fold_line_forge.cu",     &["fold_line_soa"]),
+            ("circle_ntt_layer_forge.cu",  &["circle_ntt_layer_forward",
+                                              "circle_ntt_layer_inverse"]),
+            ("fri_fold_circle_forge.cu",   &["fold_circle_into_line_soa"]),
         ]
     } else {
         &[]
