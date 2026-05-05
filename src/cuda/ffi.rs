@@ -976,7 +976,8 @@ unsafe extern "C" {
 
     /// FORGE-emitted variant of `cuda_gather_u256`. Same semantics but
     /// takes the explicit `src_len` (in u32 units) so the kernel can
-    /// bounds-check the 8-word load.
+    /// bounds-check the 8-word load.  (Always nvcc-compiled — open
+    /// toolchain build crashes with misalignedAddress; see build.rs.)
     pub fn cuda_gather_u256_forge(
         src: *const u32, idx: *const u32, dst: *mut u32,
         n: u32, src_len: u32,
@@ -1513,6 +1514,8 @@ pub mod open_toolchain {
         let blocks = (half_n + threads - 1) / threads;
         unsafe { launch(func, (blocks, 1, 1), (threads, 1, 1), &mut args, "fold_circle_into_line_soa"); }
     }
+
+    // gather_forge NOT wired — see build.rs.
 }
 
 // ─── Open-toolchain shims with the same FFI signatures as the nvcc-side
@@ -1574,6 +1577,7 @@ pub unsafe extern "C" fn cuda_fold_circle_into_line_soa_forge(
         dst0, dst1, dst2, dst3, src0, src1, src2, src3, twiddles,
         alpha, alpha_sq, half_n) }
 }
+
 
 
 

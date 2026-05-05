@@ -109,6 +109,17 @@ fn main() {
             ("circle_ntt_layer_forge.cu",  &["circle_ntt_layer_forward",
                                               "circle_ntt_layer_inverse"]),
             ("fri_fold_circle_forge.cu",   &["fold_circle_into_line_soa"]),
+            // The 3 remaining CUBIN_DIFFER wrappers (gather, reduce_m31,
+            // merkle_hash_leaves) are not wired through the open
+            // toolchain.  Per-kernel investigation in
+            // project_fb1_status.md.  Notable issues:
+            //  - gather_u256 crashes with misalignedAddress despite
+            //    valid PTX; cuobjdump rejects the cubin as "Invalid
+            //    ELF" though nvdisasm reads it
+            //  - reduce_m31 / merkle_hash_leaves have host-shim file
+            //    name mismatches (cuda/<name>.cu wraps
+            //    cuda/forge/<name>_forge.cu) that the skip-file logic
+            //    here doesn't yet handle
         ]
     } else {
         &[]
