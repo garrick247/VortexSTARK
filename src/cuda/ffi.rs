@@ -347,6 +347,8 @@ unsafe extern "C" {
     /// forge/analysis/vortex_ntt/fri_fold_line.fg with 193 proof
     /// obligations discharged. Inputs must be canonical M31
     /// (< P); the kernel canonicalizes anyway as a contract guard.
+    /// (Always nvcc-compiled — OpenCUDA vreg-aliasing bug; see
+    /// project_fb1_status.md.)
     pub fn cuda_fold_line_soa_forge(
         in0: *const u32, in1: *const u32, in2: *const u32, in3: *const u32,
         twiddles: *const u32,
@@ -1371,13 +1373,13 @@ pub mod open_toolchain {
         }
     }
 
-    // fri_fold_line_soa, circle_ntt_layer, fold_circle: previously wired
-    // through this path but produced silent miscompiles in cairo proofs
-    // ("Line fold mismatch" / "Circle fold mismatch at query …")
-    // despite passing the gpu_forge parity tests.  The parity-test
-    // inputs don't exercise the buggy code paths.  Reverted; stays
-    // nvcc-compiled until the underlying OpenCUDA codegen difference is
-    // diagnosed.  See project_fb1_status.md.
+    // fri_fold_line_soa, circle_ntt_layer, fold_circle_into_line_soa:
+    // NOT wired through the open toolchain.  Each silently miscompiles
+    // under cairo proofs because the FORGE source emits 8+ reduce_word
+    // calls whose outputs collide on OpenCUDA's vreg allocator (e.g.
+    // %r40 holds f1_a_re THEN gets reassigned to f1_b_re before the
+    // sum_a_re computation reads it, so sum_a_re = f0_a_re + f1_b_re
+    // instead of f0_a_re + f1_a_re).  See project_fb1_status.md.
 }
 
 // ─── Open-toolchain shims with the same FFI signatures as the nvcc-side
@@ -1405,5 +1407,6 @@ pub unsafe extern "C" fn cuda_batch_inverse_m31_forge(
 ) {
     unsafe { open_toolchain::cuda_batch_inverse_m31_forge(input, output, n) }
 }
+
 
 
