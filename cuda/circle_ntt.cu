@@ -40,6 +40,29 @@ extern "C" {
         uint32_t n,
         uint32_t n_cols,
         int forward);
+
+    // Aggregate entry points: do upload_col_spans ONCE, reuse across
+    // all layers + final scale. Avoids per-layer cudaMalloc + cudaMemcpy
+    // + cudaFree overhead (~100ms at log_n=18 for the per-layer path).
+    void cuda_circle_ntt_evaluate_batch_forge(
+        uint32_t* const* col_ptrs,
+        const uint32_t* d_twiddles,
+        const uint32_t* d_circle_twids,
+        const uint32_t* h_layer_offsets,
+        const uint32_t* h_layer_sizes,
+        uint32_t n_line_layers,
+        uint32_t n,
+        uint32_t n_cols);
+
+    void cuda_circle_ntt_interpolate_batch_forge(
+        uint32_t* const* col_ptrs,
+        const uint32_t* d_itwiddles,
+        const uint32_t* d_circle_itwids,
+        const uint32_t* h_layer_offsets,
+        const uint32_t* h_layer_sizes,
+        uint32_t n_line_layers,
+        uint32_t n,
+        uint32_t n_cols);
 }
 #define LAUNCH_NTT_BATCH_LAYER(blocks, threads, cols, tw, li, half_n, n_cols, fw) \
     cuda_circle_ntt_batch_layer_forge((cols), (tw), (li), (half_n) * 2u, (n_cols), (fw))
@@ -298,6 +321,14 @@ void cuda_circle_ntt_evaluate_batch(
     uint32_t n,
     uint32_t n_cols
 ) {
+#ifdef FORGE_NTT_BATCH
+    // Single-call dispatch — uploads the per-column span descriptor
+    // ONCE inside the FORGE shim and reuses it across all layers.
+    cuda_circle_ntt_evaluate_batch_forge(
+        d_columns, d_twiddles, d_circle_twids,
+        h_layer_offsets, h_layer_sizes,
+        n_line_layers, n, n_cols);
+#else
     uint32_t half_n = n / 2;
     uint32_t total = half_n * n_cols;
     uint32_t threads = 256;
@@ -319,6 +350,7 @@ void cuda_circle_ntt_evaluate_batch(
     );
 
     cudaDeviceSynchronize();
+#endif
 }
 
 void cuda_circle_ntt_interpolate_batch(
@@ -331,6 +363,14 @@ void cuda_circle_ntt_interpolate_batch(
     uint32_t n,
     uint32_t n_cols
 ) {
+#ifdef FORGE_NTT_BATCH
+    // Single-call dispatch — uploads span descriptor ONCE and reuses
+    // across all layers + final m31_batch_scale.
+    cuda_circle_ntt_interpolate_batch_forge(
+        d_columns, d_itwiddles, d_circle_itwids,
+        h_layer_offsets, h_layer_sizes,
+        n_line_layers, n, n_cols);
+#else
     uint32_t half_n = n / 2;
     uint32_t total = half_n * n_cols;
     uint32_t threads = 256;
@@ -360,6 +400,7 @@ void cuda_circle_ntt_interpolate_batch(
     m31_batch_scale_kernel<<<scale_blocks, threads>>>(d_columns, inv_n, n, n_cols);
 
     cudaDeviceSynchronize();
+#endif
 }
 
 // Apply a single NTT butterfly layer (forward or inverse).
