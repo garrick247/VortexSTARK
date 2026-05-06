@@ -1,5 +1,5 @@
 // FORGE-emitted batched Circle NTT (multi-column SoA) + host shims.
-// Source: forge/analysis/vortex_ntt/circle_ntt_batch.fg (148 obligations).
+// Source: forge/analysis/vortex_ntt/circle_ntt_batch.fg (145 obligations).
 // 3 kernels: forward butterfly, inverse butterfly, m31_batch_scale.
 //
 // Replaces `cuda_circle_ntt_evaluate_batch` and `_interpolate_batch`
@@ -11,6 +11,11 @@
 // device buffer of `forge_span_u32_t[n_cols]`, fills each entry with
 // the column's device pointer + len, then passes the array pointer
 // + n_cols as the outer span's data + len.
+//
+// Phase 4 (bitwise column demux): the kernels now take `log_half_n`
+// (resp. `log_n` for scale) so the column demux uses shifts and bit-
+// ands instead of div/mod. Host computes log via __builtin_ctz on the
+// power-of-two NTT size.
 
 #include <vector>
 #include "forge/circle_ntt_batch_forge.cu"
@@ -44,6 +49,7 @@ extern "C" void cuda_circle_ntt_batch_layer_forge(
 ) {
     if (n_cols == 0 || n < 2) return;
     uint32_t half_n = n / 2;
+    uint64_t log_half_n = (uint64_t)__builtin_ctz(half_n);
     forge_span_u32_t* d_spans = upload_col_spans(col_ptrs, n_cols, n);
 
     forge_span_span_u32_t outer = { d_spans, (uintptr_t)n_cols };
@@ -57,10 +63,10 @@ extern "C" void cuda_circle_ntt_batch_layer_forge(
     uint32_t blocks = (total + threads - 1) / threads;
     if (forward) {
         circle_ntt_batch_layer_forward<<<blocks, threads>>>(
-            outer, s_tw, layer_idx, (uint64_t)half_n, (uint64_t)n_cols);
+            outer, s_tw, layer_idx, (uint64_t)half_n, log_half_n, (uint64_t)n_cols);
     } else {
         circle_ntt_batch_layer_inverse<<<blocks, threads>>>(
-            outer, s_tw, layer_idx, (uint64_t)half_n, (uint64_t)n_cols);
+            outer, s_tw, layer_idx, (uint64_t)half_n, log_half_n, (uint64_t)n_cols);
     }
     cudaFree(d_spans);
 }
@@ -72,13 +78,14 @@ extern "C" void cuda_m31_batch_scale_forge(
     uint32_t n_cols
 ) {
     if (n_cols == 0 || n == 0) return;
+    uint64_t log_n = (uint64_t)__builtin_ctz(n);
     forge_span_u32_t* d_spans = upload_col_spans(col_ptrs, n_cols, n);
     forge_span_span_u32_t outer = { d_spans, (uintptr_t)n_cols };
     uint32_t total = n * n_cols;
     uint32_t threads = 256;
     uint32_t blocks = (total + threads - 1) / threads;
     m31_batch_scale<<<blocks, threads>>>(
-        outer, scale, (uint64_t)n, (uint64_t)n_cols);
+        outer, scale, (uint64_t)n, log_n, (uint64_t)n_cols);
     cudaFree(d_spans);
 }
 
@@ -97,6 +104,7 @@ extern "C" void cuda_circle_ntt_evaluate_batch_forge(
 ) {
     if (n_cols == 0 || n < 2) return;
     uint32_t half_n = n / 2;
+    uint64_t log_half_n = (uint64_t)__builtin_ctz(half_n);
     forge_span_u32_t* d_spans = upload_col_spans(col_ptrs, n_cols, n);
     forge_span_span_u32_t outer = { d_spans, (uintptr_t)n_cols };
 
@@ -112,14 +120,14 @@ extern "C" void cuda_circle_ntt_evaluate_batch_forge(
         };
         circle_ntt_batch_layer_forward<<<blocks, threads>>>(
             outer, s_tw, (uint32_t)(layer + 1),
-            (uint64_t)half_n, (uint64_t)n_cols);
+            (uint64_t)half_n, log_half_n, (uint64_t)n_cols);
     }
     // Circle layer (layer_idx = 0)
     forge_span_u32_t s_tw_circle = {
         const_cast<uint32_t*>(d_circle_twids), (uintptr_t)half_n
     };
     circle_ntt_batch_layer_forward<<<blocks, threads>>>(
-        outer, s_tw_circle, 0u, (uint64_t)half_n, (uint64_t)n_cols);
+        outer, s_tw_circle, 0u, (uint64_t)half_n, log_half_n, (uint64_t)n_cols);
 
     cudaDeviceSynchronize();
     cudaFree(d_spans);
@@ -137,6 +145,7 @@ extern "C" void cuda_circle_ntt_interpolate_batch_forge(
 ) {
     if (n_cols == 0 || n < 2) return;
     uint32_t half_n = n / 2;
+    uint64_t log_half_n = (uint64_t)__builtin_ctz(half_n);
     forge_span_u32_t* d_spans = upload_col_spans(col_ptrs, n_cols, n);
     forge_span_span_u32_t outer = { d_spans, (uintptr_t)n_cols };
 
@@ -149,7 +158,7 @@ extern "C" void cuda_circle_ntt_interpolate_batch_forge(
         const_cast<uint32_t*>(d_circle_itwids), (uintptr_t)half_n
     };
     circle_ntt_batch_layer_inverse<<<blocks, threads>>>(
-        outer, s_tw_circle, 0u, (uint64_t)half_n, (uint64_t)n_cols);
+        outer, s_tw_circle, 0u, (uint64_t)half_n, log_half_n, (uint64_t)n_cols);
 
     // Line layers (lowest to highest)
     for (uint32_t layer = 0; layer < n_line_layers; layer++) {
@@ -159,18 +168,17 @@ extern "C" void cuda_circle_ntt_interpolate_batch_forge(
         };
         circle_ntt_batch_layer_inverse<<<blocks, threads>>>(
             outer, s_tw, layer + 1u,
-            (uint64_t)half_n, (uint64_t)n_cols);
+            (uint64_t)half_n, log_half_n, (uint64_t)n_cols);
     }
 
     // Scale by 1/n: inv_n = 2^(30*log_n mod 31) in M31.
-    uint32_t log_n = 0;
-    for (uint32_t tmp = n; tmp > 1; tmp >>= 1) log_n++;
+    uint32_t log_n = (uint32_t)__builtin_ctz(n);
     uint32_t exp = (30u * log_n) % 31u;
     uint32_t inv_n = (exp == 0) ? 1u : (1u << exp);
     uint32_t scale_total = n * n_cols;
     uint32_t scale_blocks = (scale_total + threads - 1) / threads;
     m31_batch_scale<<<scale_blocks, threads>>>(
-        outer, inv_n, (uint64_t)n, (uint64_t)n_cols);
+        outer, inv_n, (uint64_t)n, (uint64_t)log_n, (uint64_t)n_cols);
 
     cudaDeviceSynchronize();
     cudaFree(d_spans);
