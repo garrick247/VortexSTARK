@@ -1629,7 +1629,7 @@ checksum = "7da8b5736845d9f2fcb837ea5d9e2628564b3b043a70948a3f0b778838c5fb4f"
 [[package]]
 name = "stwo"
 version = "2.2.0"
-source = "git+https://github.com/garrick247/stwo-fork.git?branch=cuda-backend#289c20de80b7c7f508de9c46151fb81dae404154"
+source = "git+https://github.com/garrick247/stwo-fork.git?branch=cuda-backend#4b7521e8130823cc3f12a3087732bb934ba06b22"
 dependencies = [
  "blake2",
  "blake3",
@@ -1656,7 +1656,7 @@ dependencies = [
 [[package]]
 name = "stwo-constraint-framework"
 version = "2.2.0"
-source = "git+https://github.com/garrick247/stwo-fork.git?branch=cuda-backend#289c20de80b7c7f508de9c46151fb81dae404154"
+source = "git+https://github.com/garrick247/stwo-fork.git?branch=cuda-backend#4b7521e8130823cc3f12a3087732bb934ba06b22"
 dependencies = [
  "hashbrown 0.17.0",
  "itertools 0.12.1",
