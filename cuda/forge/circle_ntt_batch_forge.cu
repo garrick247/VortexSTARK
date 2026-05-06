@@ -114,7 +114,6 @@ static __device__ __forceinline__ uint32_t reduce_word(uint32_t v __attribute__(
 __global__ void circle_ntt_batch_layer_forward(forge_span_span_u32_t columns __attribute__((unused)), forge_span_u32_t twiddles __attribute__((unused)), uint32_t layer_idx __attribute__((unused)), uint64_t half_n __attribute__((unused)), uint64_t log_half_n __attribute__((unused)), uint64_t n_cols __attribute__((unused)));
 __global__ void circle_ntt_batch_layer_inverse(forge_span_span_u32_t columns __attribute__((unused)), forge_span_u32_t twiddles __attribute__((unused)), uint32_t layer_idx __attribute__((unused)), uint64_t half_n __attribute__((unused)), uint64_t log_half_n __attribute__((unused)), uint64_t n_cols __attribute__((unused)));
 __global__ void m31_batch_scale(forge_span_span_u32_t columns __attribute__((unused)), uint32_t scale __attribute__((unused)), uint64_t n __attribute__((unused)), uint64_t log_n __attribute__((unused)), uint64_t n_cols __attribute__((unused)));
-int main();
 
 static __device__ __forceinline__ uint64_t warp_reduce_sum(uint64_t val __attribute__((unused))) {
   uint64_t v __attribute__((unused)) = val;
@@ -492,10 +491,5 @@ __global__ void m31_batch_scale(forge_span_span_u32_t columns __attribute__((unu
     }
 
   }
-}
-
-int main() {
-  return (int)(0ULL);
-
 }
 
