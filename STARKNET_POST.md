@@ -152,4 +152,4 @@ Looking for:
 Happy to run benchmarks on specific workloads, walk through the code, or
 demo the full cairo-serde → Starknet verifier round-trip.
 
-**Repo:** https://github.com/garrick99/VortexSTARK
+**Repo:** https://github.com/garrick247/VortexSTARK

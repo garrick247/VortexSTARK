@@ -10,7 +10,7 @@ Two STARK flavors ship in-tree:
 - **Fibonacci STARK** — the canonical 1-column / 1-transition example, used as the prover/verifier baseline and benchmark target
 - **Cairo VM STARK** — full 34-column trace with 35 transition constraints, prove arbitrary Cairo programs (.casm or fetched from Starknet)
 
-Nine of the prover's GPU kernels are emitted by **[Forge](https://github.com/garrick99/forge)** (a formally-verified systems language with Z3 proof discharge) and run default-on. Total of **0 user-supplied `assume()`** across the forge-emitted surface — every fact in the production prover is SMT-discharged.
+Nine of the prover's GPU kernels are emitted by **[Forge](https://github.com/garrick247/forge)** (a formally-verified systems language with Z3 proof discharge) and run default-on. Total of **0 user-supplied `assume()`** across the forge-emitted surface — every fact in the production prover is SMT-discharged.
 
 ```
 Forge (.fg)  ──►  CUDA C  ──►  nvcc  ──►  cubin  ──►  GPU (in-tree prover)
@@ -18,7 +18,7 @@ Forge (.fg)  ──►  CUDA C  ──►  nvcc  ──►  cubin  ──►  GP
                     permute, bit-reverse, gather, barycentric, grind
 ```
 
-Open-toolchain build (no NVIDIA compiler) is also supported via the [OpenCUDA](https://github.com/garrick99/opencuda) + [OpenPTXas](https://github.com/garrick99/openptxas) pair — they consume the same Forge-emitted CUDA C / PTX. Cross-stack tooling (run / compare / benchmark / classify any kernel through any backend) lives in [forge-workbench](https://github.com/garrick99/forge-workbench).
+Open-toolchain build (no NVIDIA compiler) is also supported via the [OpenCUDA](https://github.com/garrick247/opencuda) + [OpenPTXas](https://github.com/garrick247/openptxas) pair — they consume the same Forge-emitted CUDA C / PTX. Cross-stack tooling (run / compare / benchmark / classify any kernel through any backend) lives in [forge-workbench](https://github.com/garrick247/forge-workbench).
 
 Source-available under [BSL 1.1](LICENSE), converts to Apache 2.0 on **2029-03-20**. Non-production use permitted today; commercial licensing available before the conversion date — contact garrick.wagner@gmail.com.
 
