@@ -173,4 +173,4 @@ zstd = { version = "0.13", optional = true }
 cc = "1.2"
 
 [dev-dependencies]
-stwo = { git = "https://github.com/garrick99/stwo-fork.git", branch = "cuda-backend" }
+stwo = { git = "https://github.com/garrick247/stwo-fork.git", branch = "cuda-backend" }
