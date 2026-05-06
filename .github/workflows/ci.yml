@@ -62,7 +62,7 @@ jobs:
     name: cargo test --release (GreenDragon RTX 5090)
     runs-on: [self-hosted, greendragon, gpu, rtx5090]
     env:
-      PATH: /home/runner/.cargo/bin:/usr/local/cuda/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+      PATH: /home/garrick/.cargo/bin:/usr/local/cuda/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
     steps:
       - uses: actions/checkout@v4
       - name: Remove vendor config (CI uses crates.io + public stwo-fork)
