@@ -7,15 +7,16 @@
 //       src_idx = (i >> (log_ratio + 1) << 1) | (i & 1)
 //       col[i] += curr[src_idx]
 //
-// GPU kernel: one thread per element of `col` (size col_n).
-// Both `col` and `curr` are QM31 arrays (4 u32 per element).
-// The update is in-place: col[i] += curr[src_idx].
+// SoA layout: SecureColumnByCoords has 4 SEPARATE Col<B, BaseField> channels,
+// each `col_n` M31 values long. The Rust caller invokes this kernel 4 times,
+// once per channel, with that channel's buffer.  So this kernel does plain
+// M31 add on a single channel's buffer of `col_n` u32 elements (NOT 4*col_n).
 
 #include "include/qm31.cuh"
 
 __global__ void accumulate_lift_kernel(
-    uint32_t* __restrict__ col,         // in/out: col_n QM31 elements
-    const uint32_t* __restrict__ curr,  // read-only: curr_n QM31 elements
+    uint32_t* __restrict__ col,         // in/out: col_n M31 values (one channel)
+    const uint32_t* __restrict__ curr,  // read-only: curr_n M31 values (one channel)
     uint32_t col_n,
     uint32_t log_ratio                  // = log2(col_n) - log2(curr_n)
 ) {
@@ -26,14 +27,7 @@ __global__ void accumulate_lift_kernel(
     uint32_t shift = log_ratio + 1;
     uint32_t src_idx = ((i >> shift) << 1) | (i & 1u);
 
-    QM31 col_val  = {{col[4*i],         col[4*i+1],         col[4*i+2],         col[4*i+3]}};
-    QM31 curr_val = {{curr[4*src_idx],   curr[4*src_idx+1],  curr[4*src_idx+2],  curr[4*src_idx+3]}};
-    QM31 result   = qm31_add(col_val, curr_val);
-
-    col[4*i + 0] = result.v[0];
-    col[4*i + 1] = result.v[1];
-    col[4*i + 2] = result.v[2];
-    col[4*i + 3] = result.v[3];
+    col[i] = m31_add(col[i], curr[src_idx]);
 }
 
 extern "C" {
