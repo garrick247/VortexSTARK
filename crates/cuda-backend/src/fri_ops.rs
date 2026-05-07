@@ -22,17 +22,14 @@ use super::column::CudaColumn;
 impl FriOps for CudaBackend {
     fn fold_line(
         eval: &LineEvaluation<Self>,
-        alpha: SecureField,
+        alphas: &[SecureField],
         _twiddles: &TwiddleTree<Self>,
-        fold_step: u32,
     ) -> LineEvaluation<Self> {
-        assert!(fold_step >= 1);
+        assert!(!alphas.is_empty(), "fold_line requires at least one alpha");
 
-        let mut folding_alpha = alpha;
-        let mut res = gpu_fold_line_single(eval, folding_alpha);
-        for _ in 0..fold_step - 1 {
-            folding_alpha = folding_alpha * folding_alpha;
-            res = gpu_fold_line_single(&res, folding_alpha);
+        let mut res = gpu_fold_line_single(eval, alphas[0]);
+        for &alpha in &alphas[1..] {
+            res = gpu_fold_line_single(&res, alpha);
         }
         res
     }
