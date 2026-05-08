@@ -12,10 +12,10 @@ use stwo::core::proof_of_work::GrindOps;
 
 use super::CudaBackend;
 
-/// Number of nonces to try per GPU batch. 2^24 = 16M threads per launch.
-/// On an RTX 5090 this completes in ~1ms per batch, so even pow_bits=30
-/// (expected ~1B nonces) finishes in ~60 batches = ~60ms.
-const BATCH_SIZE: u32 = 1 << 24;
+/// Number of low-bits to search per `hi` value. Must match SimdBackend's
+/// `GRIND_LOW_BITS = 20` so the two backends search the same space and
+/// return the same smallest nonce of the form `(hi << 32) | low`.
+const BATCH_SIZE: u32 = 1 << 20;
 
 /// GPU grind for standard Blake2s (IS_M31_OUTPUT=false).
 fn grind_gpu_blake2s(channel_digest: &[u8; 32], pow_bits: u32) -> u64 {
@@ -69,12 +69,27 @@ fn grind_gpu_blake2s(channel_digest: &[u8; 32], pow_bits: u32) -> u64 {
         assert!(err == 0, "cudaMemcpy H2D for grind result failed: {err}");
     }
 
-    // Step 3: Launch batches until we find a nonce
-    let mut batch_offset: u64 = 0;
+    // Step 3: Match SimdBackend's search pattern. Iterate hi = 0, 1, 2, ...
+    // and within each hi search nonces (hi << 32) | low for low in [0, 2^20).
+    // The kernel uses atomicMin so it returns the smallest qualifying nonce
+    // within the batch. Returning on first found `hi` gives the smallest
+    // overall nonce of the (hi << 32) | low form.
+    let mut hi: u64 = 0;
     let found_nonce: u64;
 
     loop {
+        let batch_offset: u64 = hi << 32;
+        // Reset result to u64::MAX before each batch.
         unsafe {
+            let init_val: u64 = u64::MAX;
+            let err = vortexstark::cuda::ffi::cudaMemcpy(
+                d_result,
+                &init_val as *const u64 as *const c_void,
+                std::mem::size_of::<u64>(),
+                vortexstark::cuda::ffi::MEMCPY_H2D,
+            );
+            assert!(err == 0, "cudaMemcpy H2D for grind result reset failed: {err}");
+
             vortexstark::cuda::ffi::cuda_grind_pow(
                 d_digest as *const u32,
                 d_result as *mut u64,
@@ -85,7 +100,6 @@ fn grind_gpu_blake2s(channel_digest: &[u8; 32], pow_bits: u32) -> u64 {
             vortexstark::cuda::ffi::cudaDeviceSynchronize();
         }
 
-        // Read result
         let mut result: u64 = u64::MAX;
         unsafe {
             let err = vortexstark::cuda::ffi::cudaMemcpy(
@@ -102,13 +116,12 @@ fn grind_gpu_blake2s(channel_digest: &[u8; 32], pow_bits: u32) -> u64 {
             break;
         }
 
-        batch_offset += BATCH_SIZE as u64;
+        hi += 1;
 
-        // Safety valve: if we've searched 2^40 nonces something is very wrong
+        // Safety valve: SimdBackend asserts hi < 2^31 - 1.
         assert!(
-            batch_offset < (1u64 << 40),
-            "GPU grind failed: searched {} nonces without finding pow_bits={pow_bits}",
-            batch_offset
+            hi < (1u64 << 31) - 1,
+            "GPU grind failed: hi reached {hi} without finding pow_bits={pow_bits}",
         );
     }
 
@@ -191,11 +204,20 @@ impl GrindOps<Blake2sChannelGeneric<true>> for CudaBackend {
             );
         }
 
-        let mut batch_offset: u64 = 0;
+        // Match SimdBackend's (hi << 32) | low pattern (see grind_gpu_blake2s).
+        let mut hi: u64 = 0;
         let found_nonce: u64;
 
         loop {
+            let batch_offset: u64 = hi << 32;
             unsafe {
+                let init_val: u64 = u64::MAX;
+                vortexstark::cuda::ffi::cudaMemcpy(
+                    d_result,
+                    &init_val as *const u64 as *const std::ffi::c_void,
+                    8, vortexstark::cuda::ffi::MEMCPY_H2D,
+                );
+
                 vortexstark::cuda::ffi::cuda_grind_pow_m31_output(
                     d_digest as *const u32,
                     d_result as *mut u64,
@@ -220,8 +242,8 @@ impl GrindOps<Blake2sChannelGeneric<true>> for CudaBackend {
                 break;
             }
 
-            batch_offset += BATCH_SIZE as u64;
-            assert!(batch_offset < (1u64 << 40), "grind_m31 failed after {batch_offset} nonces");
+            hi += 1;
+            assert!(hi < (1u64 << 31) - 1, "grind_m31 failed: hi reached {hi}");
         }
 
         unsafe {

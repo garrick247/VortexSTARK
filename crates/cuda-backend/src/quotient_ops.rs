@@ -43,45 +43,13 @@ impl QuotientOps for CudaBackend {
             span!(Level::INFO, "GPU accumulate_numerators", n_batches = sample_batches.len())
                 .entered();
 
-        // Upstream stwo now accumulates over only the first
+        // Upstream stwo accumulates over only the first
         // `column_size >> log_blowup_factor` subdomain rows (bit-reversed).
-        // Our existing GPU kernel still expects to accumulate over the
-        // FULL evaluation domain. Until the kernels are reworked to
-        // operate on a subdomain prefix, fall back to CpuBackend for
-        // correctness — matches the simd backend's small-size fallback.
-        if log_blowup_factor != 0 {
-            let cpu_evals: Vec<CircleEvaluation<CpuBackend, BaseField, BitReversedOrder>> =
-                columns
-                    .iter()
-                    .map(|c| CircleEvaluation::new(c.domain, c.values.to_cpu()))
-                    .collect();
-            let cpu_column_refs: Vec<&CircleEvaluation<CpuBackend, BaseField, BitReversedOrder>> =
-                cpu_evals.iter().collect();
-            let mut cpu_acc: Vec<AccumulatedNumerators<CpuBackend>> = vec![];
-            CpuBackend::accumulate_numerators(
-                &cpu_column_refs,
-                sample_batches,
-                &mut cpu_acc,
-                log_blowup_factor,
-            );
-            use super::column::CudaColumn;
-            for acc in cpu_acc {
-                let gpu_coords = SecureColumnByCoords {
-                    columns: acc
-                        .partial_numerators_acc
-                        .columns
-                        .map(|col| col.into_iter().collect::<CudaColumn<BaseField>>()),
-                };
-                accumulated_numerators_vec.push(AccumulatedNumerators {
-                    sample_point: acc.sample_point,
-                    partial_numerators_acc: gpu_coords,
-                    first_linear_term_acc: acc.first_linear_term_acc,
-                });
-            }
-            return;
-        }
-
+        // The bit-reversed-prefix property guarantees those are the first
+        // `subdomain_size` slots of the column, so we just pass
+        // `subdomain_size` as `n_rows` to the existing kernel.
         let size = columns[0].len();
+        let subdomain_size = size >> log_blowup_factor;
 
         // Precompute line coefficients on CPU (small: one (a,b,c) per column per batch).
         let line_coeffs = column_line_coeffs(sample_batches);
@@ -111,11 +79,11 @@ impl QuotientOps for CudaBackend {
             let d_b = DeviceBuffer::from_host(&b_flat);
             let d_c = DeviceBuffer::from_host(&c_flat);
 
-            // Allocate output SoA columns.
-            let mut out0 = DeviceBuffer::<u32>::alloc(size);
-            let mut out1 = DeviceBuffer::<u32>::alloc(size);
-            let mut out2 = DeviceBuffer::<u32>::alloc(size);
-            let mut out3 = DeviceBuffer::<u32>::alloc(size);
+            // Allocate output SoA columns of subdomain size.
+            let mut out0 = DeviceBuffer::<u32>::alloc(subdomain_size);
+            let mut out1 = DeviceBuffer::<u32>::alloc(subdomain_size);
+            let mut out2 = DeviceBuffer::<u32>::alloc(subdomain_size);
+            let mut out3 = DeviceBuffer::<u32>::alloc(subdomain_size);
 
             unsafe {
                 ffi::cuda_accumulate_numerators(
@@ -124,7 +92,7 @@ impl QuotientOps for CudaBackend {
                     d_b.as_ptr(),
                     d_c.as_ptr(),
                     n_batch_cols as u32,
-                    size as u32,
+                    subdomain_size as u32,
                     out0.as_mut_ptr(),
                     out1.as_mut_ptr(),
                     out2.as_mut_ptr(),
@@ -137,10 +105,10 @@ impl QuotientOps for CudaBackend {
             use super::column::CudaColumn;
             let gpu_coords = SecureColumnByCoords {
                 columns: [
-                    CudaColumn::from_device_buffer(out0, size),
-                    CudaColumn::from_device_buffer(out1, size),
-                    CudaColumn::from_device_buffer(out2, size),
-                    CudaColumn::from_device_buffer(out3, size),
+                    CudaColumn::from_device_buffer(out0, subdomain_size),
+                    CudaColumn::from_device_buffer(out1, subdomain_size),
+                    CudaColumn::from_device_buffer(out2, subdomain_size),
+                    CudaColumn::from_device_buffer(out3, subdomain_size),
                 ],
             };
 
@@ -168,50 +136,25 @@ impl QuotientOps for CudaBackend {
         )
         .entered();
 
-        // Upstream stwo's compute_quotients_and_combine now computes the
-        // quotient on the subdomain (size 2^(lifting_log_size -
-        // log_blowup_factor)) and then lifts via interpolation +
-        // evaluation through the supplied twiddle tree. Our GPU kernel
-        // computes on the full domain and doesn't do the lift. Fall
-        // back to CpuBackend until the kernel rework lands.
-        if log_blowup_factor != 0 {
-            use stwo::prover::poly::circle::PolyOps;
-            use super::column::CudaColumn;
-            let eval_domain = CanonicCoset::new(lifting_log_size).circle_domain();
-            let cpu_twiddles = <CpuBackend as PolyOps>::precompute_twiddles(eval_domain.half_coset);
-            let cpu_accs: Vec<AccumulatedNumerators<CpuBackend>> = accs
-                .into_iter()
-                .map(|acc| AccumulatedNumerators {
-                    sample_point: acc.sample_point,
-                    partial_numerators_acc: acc.partial_numerators_acc.to_cpu(),
-                    first_linear_term_acc: acc.first_linear_term_acc,
-                })
-                .collect();
-            let cpu_result = CpuBackend::compute_quotients_and_combine(
-                cpu_accs,
-                lifting_log_size,
-                log_blowup_factor,
-                &cpu_twiddles,
-            );
-            let gpu_values = SecureColumnByCoords {
-                columns: cpu_result
-                    .values
-                    .columns
-                    .map(|col| col.into_iter().collect::<CudaColumn<BaseField>>()),
-            };
-            return SecureEvaluation::new(cpu_result.domain, gpu_values);
-        }
-
-        let n_rows = 1u32 << lifting_log_size;
+        // Upstream stwo computes the quotient on the subdomain (size
+        // 2^(lifting_log_size - log_blowup_factor)) and then lifts via
+        // interpolation + evaluation through the supplied twiddle tree.
+        // We do the same: compute_quotients_combine_kernel produces
+        // subdomain-sized output (subdomain_log_size as the kernel'''s
+        // "lifting_log_size" arg), then we IFFT each channel and FFT to
+        // the full eval domain.
+        let eval_domain = CanonicCoset::new(lifting_log_size).circle_domain();
+        let (eval_subdomain, _) = eval_domain.split(log_blowup_factor);
+        let subdomain_log_size = eval_subdomain.log_size();
+        let n_rows = 1u32 << subdomain_log_size;
         let n_accs = accs.len();
-        let domain = CanonicCoset::new(lifting_log_size).circle_domain();
+        let domain = eval_subdomain;
 
-        // Precompute domain points on CPU and upload.
-        // bit_reverse_index gives us the natural-order index from the bit-reversed row index.
+        // Precompute domain points on CPU and upload (subdomain points).
         let mut domain_xs = Vec::with_capacity(n_rows as usize);
         let mut domain_ys = Vec::with_capacity(n_rows as usize);
         for row in 0..n_rows as usize {
-            let pt = domain.at(bit_reverse_index(row, lifting_log_size));
+            let pt = domain.at(bit_reverse_index(row, subdomain_log_size));
             domain_xs.push(pt.x.0);
             domain_ys.push(pt.y.0);
         }
@@ -275,7 +218,7 @@ impl QuotientOps for CudaBackend {
                 n_accs as u32,
                 d_domain_xs.as_ptr(),
                 d_domain_ys.as_ptr(),
-                lifting_log_size,
+                subdomain_log_size,
                 n_rows,
                 out0.as_mut_ptr(),
                 out1.as_mut_ptr(),
@@ -285,15 +228,28 @@ impl QuotientOps for CudaBackend {
             ffi::cuda_device_sync();
         }
 
+        // Lift: for each of the 4 SoA channels, interpolate over eval_subdomain
+        // (IFFT) and evaluate over eval_domain (FFT). CudaBackend::interpolate
+        // and evaluate look up GPU twiddles via the internal coset cache, so the
+        // passed `_twiddles` argument is unused.
         use super::column::CudaColumn;
-        let gpu_cols = SecureColumnByCoords {
-            columns: [
-                CudaColumn::from_device_buffer(out0, n_rows as usize),
-                CudaColumn::from_device_buffer(out1, n_rows as usize),
-                CudaColumn::from_device_buffer(out2, n_rows as usize),
-                CudaColumn::from_device_buffer(out3, n_rows as usize),
-            ],
+        use stwo::prover::poly::circle::PolyOps;
+
+        let dummy_twiddles = CudaBackend::precompute_twiddles(eval_subdomain.half_coset);
+        let lift = |sub_buf: DeviceBuffer<u32>| -> CudaColumn<BaseField> {
+            let col = CudaColumn::<BaseField>::from_device_buffer(sub_buf, n_rows as usize);
+            let circle_eval = CircleEvaluation::<CudaBackend, BaseField, BitReversedOrder>::new(
+                eval_subdomain,
+                col,
+            );
+            let poly = CudaBackend::interpolate(circle_eval, &dummy_twiddles);
+            let evaluated = CudaBackend::evaluate(&poly, eval_domain, &dummy_twiddles);
+            evaluated.values
         };
-        SecureEvaluation::new(domain, gpu_cols)
+
+        let lifted_cols = SecureColumnByCoords {
+            columns: [lift(out0), lift(out1), lift(out2), lift(out3)],
+        };
+        SecureEvaluation::new(eval_domain, lifted_cols)
     }
 }

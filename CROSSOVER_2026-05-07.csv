@@ -1,0 +1,5 @@
+N,sim_prove_s,cuda_prove_s,proof_md5_match
+100,4.06,4.01,YES
+2000,4.23,4.05,YES
+10000,4.16,4.06,YES
+50000,4.56,4.26,YES
