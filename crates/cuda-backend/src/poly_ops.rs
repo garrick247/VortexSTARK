@@ -249,6 +249,59 @@ fn get_fold_workspace(n: usize) -> Arc<Mutex<FoldWorkspace>> {
     arc
 }
 
+// ---------------------------------------------------------------------------
+// eval_at_point workspace cache
+// ---------------------------------------------------------------------------
+//
+// The OOD phase calls eval_at_point hundreds of times. Each call previously
+// allocated two fresh QM31 scratch buffers (4*(n/2) u32s) via cudaMalloc and
+// freed them on drop, which dominated wall time at log_n>=15. Cache one
+// ping/pong pair per element-count n; buffers are overwritten on every call
+// so no zeroing is needed between uses.
+
+struct EvalAtPointWorkspace {
+    scratch1: DeviceBuffer<u32>,
+    scratch2: DeviceBuffer<u32>,
+}
+
+fn eval_at_point_workspace_cache()
+    -> &'static Mutex<HashMap<usize, Arc<Mutex<EvalAtPointWorkspace>>>>
+{
+    static CACHE: OnceLock<Mutex<HashMap<usize, Arc<Mutex<EvalAtPointWorkspace>>>>> = OnceLock::new();
+    CACHE.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+
+pub static EVAL_AT_POINT_CALLS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+pub static EVAL_AT_POINT_NANOS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+pub fn eval_at_point_stats_take() -> (u64, u64) {
+    use std::sync::atomic::Ordering::Relaxed;
+    let calls = EVAL_AT_POINT_CALLS.swap(0, Relaxed);
+    let nanos = EVAL_AT_POINT_NANOS.swap(0, Relaxed);
+    (calls, nanos)
+}
+
+fn get_eval_at_point_workspace(n: usize) -> Arc<Mutex<EvalAtPointWorkspace>> {
+    {
+        let cache = eval_at_point_workspace_cache().lock().unwrap();
+        if let Some(ws) = cache.get(&n) {
+            return Arc::clone(ws);
+        }
+    }
+    let half_n = n / 2;
+    let ws = EvalAtPointWorkspace {
+        scratch1: DeviceBuffer::<u32>::alloc(half_n * 4),
+        scratch2: DeviceBuffer::<u32>::alloc(half_n * 4),
+    };
+    let arc = Arc::new(Mutex::new(ws));
+    {
+        let mut cache = eval_at_point_workspace_cache().lock().unwrap();
+        cache.entry(n).or_insert(Arc::clone(&arc));
+    }
+    arc
+}
+
 /// Convert stwo Coset → VortexSTARK Coset.
 pub fn convert_coset(coset: &StwoCoset) -> VortexCoset {
     VortexCoset {
@@ -301,6 +354,13 @@ impl PolyOps for CudaBackend {
             return poly.coeffs.at(0).into();
         }
 
+        // Small polys: CPU is faster than launching kernels.
+        if n < (1 << 10) {
+            let cpu_coeffs: Vec<BaseField> = poly.coeffs.to_cpu();
+            let cpu_poly = stwo::prover::backend::cpu::CpuCirclePoly::new(cpu_coeffs);
+            return CpuBackend::eval_at_point(&cpu_poly, point);
+        }
+
         // Compute folding factors: [y, x, double_x(x), ...] reversed
         let mut mappings = vec![point.y];
         let mut x = point.x;
@@ -318,23 +378,24 @@ impl PolyOps for CudaBackend {
         }
         let d_factors = DeviceBuffer::from_host(&factors_flat);
 
-        // Scratch buffers for GPU fold (QM31 = 4 u32s per element)
-        let half_n = n / 2;
-        let d_scratch1 = DeviceBuffer::<u32>::alloc(half_n * 4);
-        let d_scratch2 = DeviceBuffer::<u32>::alloc(half_n * 4);
+        // Acquire pooled scratch buffers (avoids cudaMalloc/cudaFree per call).
+        let ws_arc = get_eval_at_point_workspace(n);
+        let ws = ws_arc.lock().unwrap();
 
-        // GPU fold: reduces n M31 coefficients to 1 QM31 result
         let mut result = [0u32; 4];
+        let _t0 = std::time::Instant::now();
         unsafe {
             vortexstark::cuda::ffi::cuda_eval_at_point(
                 poly.coeffs.buf.as_ptr(),
                 d_factors.as_ptr(),
                 result.as_mut_ptr(),
                 n as u32,
-                d_scratch1.as_ptr() as *mut u32,
-                d_scratch2.as_ptr() as *mut u32,
+                ws.scratch1.as_ptr() as *mut u32,
+                ws.scratch2.as_ptr() as *mut u32,
             );
         }
+        EVAL_AT_POINT_CALLS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        EVAL_AT_POINT_NANOS.fetch_add(_t0.elapsed().as_nanos() as u64, std::sync::atomic::Ordering::Relaxed);
 
         SecureField::from_m31_array(std::array::from_fn(|i| M31::from_u32_unchecked(result[i])))
     }
