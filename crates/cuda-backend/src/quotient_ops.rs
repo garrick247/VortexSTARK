@@ -9,6 +9,8 @@
 //! where den_inv_j is computed from (sample_point_j, domain_point) on GPU.
 
 use std::iter::zip;
+use std::collections::HashMap;
+use std::sync::{Arc, Mutex, OnceLock};
 
 use tracing::{span, Level};
 use stwo::core::fields::m31::BaseField;
@@ -30,6 +32,54 @@ use super::CudaBackend;
 fn secure_to_raw(v: SecureField) -> [u32; 4] {
     let arr = v.to_m31_array();
     [arr[0].0, arr[1].0, arr[2].0, arr[3].0]
+}
+
+
+/// Cache for bit-reversed subdomain (x, y) coordinate buffers used by
+/// compute_quotients_and_combine. Keyed by (subdomain_log_size,
+/// log_blowup_factor) since the canonical subdomain is deterministic for
+/// that pair. Built once per process; later proves with the same key
+/// reuse the GPU upload instead of running the 8M-row CPU precompute loop.
+struct DomainPointBuffers {
+    xs: DeviceBuffer<u32>,
+    ys: DeviceBuffer<u32>,
+}
+
+fn domain_points_cache() -> &'static Mutex<HashMap<(u32, u32), Arc<DomainPointBuffers>>> {
+    static CACHE: OnceLock<Mutex<HashMap<(u32, u32), Arc<DomainPointBuffers>>>> = OnceLock::new();
+    CACHE.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+fn get_or_compute_domain_points(
+    domain: &stwo::core::poly::circle::CircleDomain,
+    subdomain_log_size: u32,
+    log_blowup_factor: u32,
+) -> Arc<DomainPointBuffers> {
+    let key = (subdomain_log_size, log_blowup_factor);
+    {
+        let cache = domain_points_cache().lock().unwrap();
+        if let Some(arc) = cache.get(&key) {
+            return arc.clone();
+        }
+    }
+    let n_rows = 1usize << subdomain_log_size;
+    let mut xs = Vec::with_capacity(n_rows);
+    let mut ys = Vec::with_capacity(n_rows);
+    for row in 0..n_rows {
+        let pt = domain.at(bit_reverse_index(row, subdomain_log_size));
+        xs.push(pt.x.0);
+        ys.push(pt.y.0);
+    }
+    let new_arc = Arc::new(DomainPointBuffers {
+        xs: DeviceBuffer::from_host(&xs),
+        ys: DeviceBuffer::from_host(&ys),
+    });
+    let mut cache = domain_points_cache().lock().unwrap();
+    if let Some(existing) = cache.get(&key) {
+        return existing.clone();
+    }
+    cache.insert(key, new_arc.clone());
+    new_arc
 }
 
 impl QuotientOps for CudaBackend {
@@ -150,16 +200,8 @@ impl QuotientOps for CudaBackend {
         let n_accs = accs.len();
         let domain = eval_subdomain;
 
-        // Precompute domain points on CPU and upload (subdomain points).
-        let mut domain_xs = Vec::with_capacity(n_rows as usize);
-        let mut domain_ys = Vec::with_capacity(n_rows as usize);
-        for row in 0..n_rows as usize {
-            let pt = domain.at(bit_reverse_index(row, subdomain_log_size));
-            domain_xs.push(pt.x.0);
-            domain_ys.push(pt.y.0);
-        }
-        let d_domain_xs = DeviceBuffer::from_host(&domain_xs);
-        let d_domain_ys = DeviceBuffer::from_host(&domain_ys);
+        // Cached bit-reversed subdomain points.
+        let domain_pts = get_or_compute_domain_points(&domain, subdomain_log_size, log_blowup_factor);
 
         // Pack sample point data.
         let mut sp_x_flat = Vec::with_capacity(n_accs * 4);
@@ -216,8 +258,8 @@ impl QuotientOps for CudaBackend {
                 d_numer3.as_ptr() as *const *const u32,
                 d_acc_log_sizes.as_ptr(),
                 n_accs as u32,
-                d_domain_xs.as_ptr(),
-                d_domain_ys.as_ptr(),
+                domain_pts.xs.as_ptr(),
+                domain_pts.ys.as_ptr(),
                 subdomain_log_size,
                 n_rows,
                 out0.as_mut_ptr(),
