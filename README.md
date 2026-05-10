@@ -225,6 +225,34 @@ These should **not** break. If they do, that's a real soundness bug:
 | `test_tamper_ec_trace` | Corrupt EC trace commitment | REJECTED |
 | `test_soundness_oods_quotient_tamper` | Corrupt OODS quotient decommitment value | REJECTED |
 
+## Use as a Stwo CudaBackend
+
+VortexSTARK also exposes `vortex-cuda-backend` — a `stwo::prover::Backend`
+implementation that routes Stwo's prove pipeline through the same GPU
+kernels described above. This makes it a drop-in CudaBackend for the
+upstream [`stwo`](https://github.com/starkware-libs/stwo) crate (via
+[`garrick247/stwo-fork`](https://github.com/garrick247/stwo-fork) for the
+PoC trait extensions).
+
+End-to-end measured on stwo-cairo's `test_data/test_prove_verify_*`
+programs (RTX 5090 + Core Ultra 9 285K, warm prove vs CPU SimdBackend):
+
+| Program | CUDA warm | CPU | Speedup |
+|---|---:|---:|---:|
+| ret_opcode | 0.73s | 4.17s | **5.7x** |
+| range_check_bits_128 | 1.18s | 4.24s | **3.6x** |
+| bitwise_builtin | 1.24s | 4.32s | **3.5x** |
+| pedersen_builtin | 5.37s | 7.65s | **1.4x** |
+
+All four produce **byte-identical proofs** to the CPU SimdBackend and
+verify via `verify_cairo_ex`.
+
+To prove a Cairo program with this backend, see the
+[`cuda-backend-poc` branch of stwo-cairo](https://github.com/garrick247/stwo-cairo/tree/cuda-backend-poc),
+which has the integration wired into `run_and_prove_cuda`. The
+`stwo_cairo_prover` crate enables it behind a `cuda-backend` feature
+flag that pulls `vortex-cuda-backend` from this repository.
+
 ## Author
 
 Garrick Wagner — independent GPU systems work. Contact: garrick.wagner@gmail.com.
