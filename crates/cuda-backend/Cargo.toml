@@ -19,8 +19,8 @@ forge-bit-reverse = ["vortexstark/forge-bit-reverse"]
 forge-gather = ["vortexstark/forge-gather"]
 
 [dependencies]
-stwo = { git = "https://github.com/garrick247/stwo-fork.git", branch = "cuda-backend-dev-head", features = ["prover"] }
-stwo-constraint-framework = { git = "https://github.com/garrick247/stwo-fork.git", branch = "cuda-backend-dev-head", features = ["prover"] }
+stwo = { git = "https://github.com/garrick247/stwo-fork.git", rev = "483f8c94c02bc7c4eaf128f2cd2269dd6f1a5f6c", features = ["prover"] }
+stwo-constraint-framework = { git = "https://github.com/garrick247/stwo-fork.git", rev = "483f8c94c02bc7c4eaf128f2cd2269dd6f1a5f6c", features = ["prover"] }
 vortexstark = { path = "../.." }
 serde = { version = "1.0", features = ["derive"] }
 itertools = "0.14.0"
