@@ -322,6 +322,35 @@ pub fn twiddle_cache_for_coset(coset: &StwoCoset) -> TwiddleCache {
     TwiddleCache::new(&convert_coset(coset))
 }
 
+// Per-call counters for the NTT path (interpolate = IFFT, evaluate = FFT).
+pub static NTT_CALLS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+pub static NTT_NANOS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+pub static IFFT_CALLS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+pub static IFFT_NANOS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+pub fn ntt_stats_take() -> (u64, u64, u64, u64) {
+    use std::sync::atomic::Ordering::Relaxed;
+    (
+        NTT_CALLS.swap(0, Relaxed),
+        NTT_NANOS.swap(0, Relaxed),
+        IFFT_CALLS.swap(0, Relaxed),
+        IFFT_NANOS.swap(0, Relaxed),
+    )
+}
+
+struct NttStatsGuard {
+    t0: std::time::Instant,
+    calls: &'static std::sync::atomic::AtomicU64,
+    nanos: &'static std::sync::atomic::AtomicU64,
+}
+impl Drop for NttStatsGuard {
+    fn drop(&mut self) {
+        use std::sync::atomic::Ordering::Relaxed;
+        self.calls.fetch_add(1, Relaxed);
+        self.nanos.fetch_add(self.t0.elapsed().as_nanos() as u64, Relaxed);
+    }
+}
+
 impl PolyOps for CudaBackend {
     type Twiddles = CudaTwiddles;
 
@@ -329,6 +358,7 @@ impl PolyOps for CudaBackend {
         eval: CircleEvaluation<Self, BaseField, BitReversedOrder>,
         _twiddles: &TwiddleTree<Self>,
     ) -> CircleCoefficients<Self> {
+        let _g = NttStatsGuard { t0: std::time::Instant::now(), calls: &IFFT_CALLS, nanos: &IFFT_NANOS };
         let mut values = eval.values;
         let n = values.len() as u32;
 
@@ -612,6 +642,7 @@ impl PolyOps for CudaBackend {
         domain: CircleDomain,
         _twiddles: &TwiddleTree<Self>,
     ) -> CircleEvaluation<Self, BaseField, BitReversedOrder> {
+        let _g = NttStatsGuard { t0: std::time::Instant::now(), calls: &NTT_CALLS, nanos: &NTT_NANOS };
         let mut values = Self::extend(poly, domain.log_size()).coeffs;
         let n = values.len() as u32;
 
