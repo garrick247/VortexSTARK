@@ -91,12 +91,46 @@ fn get_or_compute_line_fold_twiddles(
     new_arc
 }
 
+// Per-call counters for FriOps GPU path.
+pub static FOLD_LINE_CALLS: std::sync::atomic::AtomicU64 =
+    std::sync::atomic::AtomicU64::new(0);
+pub static FOLD_LINE_NANOS: std::sync::atomic::AtomicU64 =
+    std::sync::atomic::AtomicU64::new(0);
+pub static FOLD_CIRCLE_CALLS: std::sync::atomic::AtomicU64 =
+    std::sync::atomic::AtomicU64::new(0);
+pub static FOLD_CIRCLE_NANOS: std::sync::atomic::AtomicU64 =
+    std::sync::atomic::AtomicU64::new(0);
+
+pub fn fri_stats_take() -> (u64, u64, u64, u64) {
+    use std::sync::atomic::Ordering::Relaxed;
+    (
+        FOLD_LINE_CALLS.swap(0, Relaxed),
+        FOLD_LINE_NANOS.swap(0, Relaxed),
+        FOLD_CIRCLE_CALLS.swap(0, Relaxed),
+        FOLD_CIRCLE_NANOS.swap(0, Relaxed),
+    )
+}
+
+struct FriStatsGuard {
+    t0: std::time::Instant,
+    calls: &'static std::sync::atomic::AtomicU64,
+    nanos: &'static std::sync::atomic::AtomicU64,
+}
+impl Drop for FriStatsGuard {
+    fn drop(&mut self) {
+        use std::sync::atomic::Ordering::Relaxed;
+        self.calls.fetch_add(1, Relaxed);
+        self.nanos.fetch_add(self.t0.elapsed().as_nanos() as u64, Relaxed);
+    }
+}
+
 impl FriOps for CudaBackend {
     fn fold_line(
         eval: &LineEvaluation<Self>,
         alphas: &[SecureField],
         _twiddles: &TwiddleTree<Self>,
     ) -> LineEvaluation<Self> {
+        let _g = FriStatsGuard { t0: std::time::Instant::now(), calls: &FOLD_LINE_CALLS, nanos: &FOLD_LINE_NANOS };
         assert!(!alphas.is_empty(), "fold_line requires at least one alpha");
 
         let mut res = gpu_fold_line_single(eval, alphas[0]);
@@ -111,6 +145,7 @@ impl FriOps for CudaBackend {
         alpha: SecureField,
         _twiddles: &TwiddleTree<Self>,
     ) -> LineEvaluation<Self> {
+        let _g = FriStatsGuard { t0: std::time::Instant::now(), calls: &FOLD_CIRCLE_CALLS, nanos: &FOLD_CIRCLE_NANOS };
         let n = src.len();
         let half_n = n / 2;
         let domain = src.domain;
