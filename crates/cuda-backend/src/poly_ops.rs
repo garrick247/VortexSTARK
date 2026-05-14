@@ -768,6 +768,65 @@ impl PolyOps for CudaBackend {
         result
     }
 
+    /// Batched interpolate over many columns. Mirrors evaluate_polynomials but
+    /// for the inverse NTT direction. Groups by log_size (= columns[i].domain.log_size())
+    /// and runs the batched inverse kernel per group. In-place: input buffers become
+    /// output coefficient buffers (after IFFT + 1/n scale).
+    fn interpolate_columns(
+        columns: Vec<stwo::prover::poly::circle::CircleEvaluation<Self, stwo::core::fields::m31::BaseField, stwo::prover::poly::BitReversedOrder>>,
+        twiddles: &stwo::prover::poly::twiddles::TwiddleTree<Self>,
+    ) -> Vec<stwo::prover::poly::circle::CircleCoefficients<Self>> {
+        use stwo::prover::poly::circle::CircleCoefficients;
+        use vortexstark::cuda::ffi;
+
+        let _ = twiddles;  // we use our internal twiddle cache
+
+        // Group column indices by domain.log_size().
+        let n = columns.len();
+        let mut groups: std::collections::HashMap<u32, Vec<usize>> =
+            std::collections::HashMap::new();
+        for (i, col) in columns.iter().enumerate() {
+            groups.entry(col.domain.log_size()).or_default().push(i);
+        }
+
+        let mut columns: Vec<Option<stwo::prover::poly::circle::CircleEvaluation<Self, stwo::core::fields::m31::BaseField, stwo::prover::poly::BitReversedOrder>>> = columns.into_iter().map(Some).collect();
+        let mut outputs: Vec<Option<CircleCoefficients<Self>>> = (0..n).map(|_| None).collect();
+
+        for (log_size, indices) in &groups {
+            let size = 1usize << log_size;
+            let n_cols = indices.len();
+
+            // Build the half_coset for twiddle lookup (matches single-poly interpolate).
+            let domain = columns[indices[0]].as_ref().expect("slot live").domain;
+            let (_d_twiddles, d_itwiddles) = cached_gpu_twiddles(&domain.half_coset);
+
+            // Gather mutable device pointers from the input CudaColumns. The kernel
+            // works in-place; we move the buffers out of the inputs at the end.
+            let mut col_ptrs: Vec<*mut u32> = Vec::with_capacity(n_cols);
+            for &idx in indices.iter() {
+                col_ptrs.push(columns[idx].as_mut().expect("slot live").values.buf.as_mut_ptr());
+            }
+
+            unsafe {
+                ffi::cuda_stwo_ntt_batch_interpolate(
+                    col_ptrs.as_ptr(),
+                    d_itwiddles.as_ptr(),
+                    size as u32,
+                    n_cols as u32,
+                );
+                ffi::cuda_device_sync();
+            }
+
+            for &idx in indices.iter() {
+                let eval = columns[idx].take().expect("slot live");
+                outputs[idx] = Some(CircleCoefficients::new(eval.values));
+            }
+            let _ = size;
+        }
+
+        outputs.into_iter().map(|c| c.expect("every slot filled")).collect()
+    }
+
     fn evaluate_into(
         poly: &CircleCoefficients<Self>,
         domain: CircleDomain,
