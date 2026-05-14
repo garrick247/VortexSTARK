@@ -20,11 +20,36 @@ use vortexstark::device::DeviceBuffer;
 use super::CudaBackend;
 use super::column::CudaColumn;
 
+// Per-call counters for the Merkle leaf-layer GPU hash path.
+// Bumped on entry to build_leaves regardless of hasher (Blake2s or Poseidon).
+pub static MERKLE_BUILD_CALLS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+pub static MERKLE_BUILD_NANOS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+pub fn merkle_stats_take() -> (u64, u64) {
+    use std::sync::atomic::Ordering::Relaxed;
+    (
+        MERKLE_BUILD_CALLS.swap(0, Relaxed),
+        MERKLE_BUILD_NANOS.swap(0, Relaxed),
+    )
+}
+
+struct MerkleStatsGuard {
+    t0: std::time::Instant,
+}
+impl Drop for MerkleStatsGuard {
+    fn drop(&mut self) {
+        use std::sync::atomic::Ordering::Relaxed;
+        MERKLE_BUILD_CALLS.fetch_add(1, Relaxed);
+        MERKLE_BUILD_NANOS.fetch_add(self.t0.elapsed().as_nanos() as u64, Relaxed);
+    }
+}
+
 impl<const IS_M31_OUTPUT: bool> MerkleOpsLifted<Blake2sMerkleHasherGeneric<IS_M31_OUTPUT>> for CudaBackend {
     fn build_leaves(
         columns: &[&Col<Self, BaseField>],
         lifting_log_size: u32,
     ) -> Col<Self, Blake2sHash> {
+        let _merkle_g = MerkleStatsGuard { t0: std::time::Instant::now() };
         let t0 = std::time::Instant::now();
         let n_leaves = 1u32 << lifting_log_size;
 
@@ -205,6 +230,7 @@ impl PackLeavesOps for CudaBackend {
 // Poseidon252 MerkleOpsLifted: GPU-accelerated via merkle_poseidon252.cu
 #[cfg(not(target_arch = "wasm32"))]
 mod poseidon_merkle {
+    use super::MerkleStatsGuard;
     use stwo::prover::backend::{Col, Column};
     use stwo::core::fields::m31::BaseField;
     use stwo::core::vcs_lifted::poseidon252_merkle::Poseidon252MerkleHasher;
@@ -222,6 +248,7 @@ mod poseidon_merkle {
             columns: &[&Col<Self, BaseField>],
             lifting_log_size: u32,
         ) -> Col<Self, FieldElement252> {
+        let _merkle_g = MerkleStatsGuard { t0: std::time::Instant::now() };
             let n_leaves = 1u32 << lifting_log_size;
 
             if columns.is_empty() {
