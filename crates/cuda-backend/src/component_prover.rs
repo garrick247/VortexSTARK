@@ -38,6 +38,29 @@ use vortexstark::cuda::ffi;
 use vortexstark::device::DeviceBuffer;
 
 use super::CudaBackend;
+
+// Per-call counters for the constraint-evaluation bytecode path. GPU_BYTECODE_*
+// bump on every successful warp-cooperative kernel launch; CPU_BYTECODE_* bump
+// on every fallback that lands in the slow download-eval-upload-back path.
+// Nanos are end-to-end (from before try_gpu_bytecode_eval through end of fn).
+pub static GPU_BYTECODE_LAUNCHES: std::sync::atomic::AtomicU64 =
+    std::sync::atomic::AtomicU64::new(0);
+pub static GPU_BYTECODE_NANOS: std::sync::atomic::AtomicU64 =
+    std::sync::atomic::AtomicU64::new(0);
+pub static CPU_BYTECODE_FALLBACKS: std::sync::atomic::AtomicU64 =
+    std::sync::atomic::AtomicU64::new(0);
+pub static CPU_BYTECODE_NANOS: std::sync::atomic::AtomicU64 =
+    std::sync::atomic::AtomicU64::new(0);
+
+pub fn bytecode_kernel_stats_take() -> (u64, u64, u64, u64) {
+    use std::sync::atomic::Ordering::Relaxed;
+    let gpu_calls = GPU_BYTECODE_LAUNCHES.swap(0, Relaxed);
+    let gpu_nanos = GPU_BYTECODE_NANOS.swap(0, Relaxed);
+    let cpu_calls = CPU_BYTECODE_FALLBACKS.swap(0, Relaxed);
+    let cpu_nanos = CPU_BYTECODE_NANOS.swap(0, Relaxed);
+    (gpu_calls, gpu_nanos, cpu_calls, cpu_nanos)
+}
+
 use super::constraint_eval::bytecode::BytecodeOp;
 use super::constraint_eval::tracing::record_bytecode;
 
@@ -194,6 +217,7 @@ fn evaluate_constraint_quotients_impl<E: FrameworkEval + Sync>(
     accum.random_coeff_powers.reverse();
 
     // GPU register-based bytecode constraint eval.
+    let t_bytecode = std::time::Instant::now();
     let gpu_success = try_gpu_bytecode_eval(
         component,
         &gpu_trace_evals,
@@ -206,8 +230,12 @@ fn evaluate_constraint_quotients_impl<E: FrameworkEval + Sync>(
     );
 
     if gpu_success {
+        GPU_BYTECODE_LAUNCHES.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        GPU_BYTECODE_NANOS.fetch_add(t_bytecode.elapsed().as_nanos() as u64, std::sync::atomic::Ordering::Relaxed);
         return;
     }
+
+    CPU_BYTECODE_FALLBACKS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
 
     // ── CPU fallback path ──────────────────────────────────────────────
     tracing::warn!("GPU bytecode eval failed, falling back to CPU");
@@ -266,6 +294,8 @@ fn evaluate_constraint_quotients_impl<E: FrameworkEval + Sync>(
             }),
         };
     }
+
+    CPU_BYTECODE_NANOS.fetch_add(t_bytecode.elapsed().as_nanos() as u64, std::sync::atomic::Ordering::Relaxed);
 }
 
 /// Try to evaluate constraints on GPU using the register-based bytecode interpreter.
@@ -307,9 +337,9 @@ fn try_gpu_bytecode_eval<E: FrameworkEval>(
     // 16-bit register indices support up to 65535 registers; GPU MAX_REGS=1024.
     // Components with >1024 registers use the warp-cooperative kernel.
     // Components with >8192 registers fall back to CPU (unlikely in practice).
-    if program.n_registers > 8192 {
+    if program.n_registers > 32768 {
         tracing::warn!(
-            "Bytecode uses {} registers (max 8192) — falling back to CPU",
+            "Bytecode uses {} registers (max 32768) — falling back to CPU",
             program.n_registers
         );
         return false;
