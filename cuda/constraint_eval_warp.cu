@@ -47,8 +47,8 @@
 #define OP_ADD_CONSTRAINT       0x40
 
 // Max registers per thread (= ceil(total_regs / 32)).
-// 256 per thread * 32 lanes = 8192 total registers max.
-#define REGS_PER_LANE 256
+// 1024 per thread * 32 lanes = 32768 total registers max (bumped from 256 to fit heavy stwo-cairo components).
+#define REGS_PER_LANE 1024  // raised 256 -> 1024 (cap 8192 -> 32768)
 
 // ─── Bit-reversed circle domain offset ─────────────────────────────────
 
