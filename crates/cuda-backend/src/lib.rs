@@ -26,6 +26,8 @@ pub use poly_ops::eval_at_point_stats_take;
 pub use component_prover::bytecode_kernel_stats_take;
 pub use quotient_ops::quotient_stats_take;
 pub use fri_ops::fri_stats_take;
+pub use poly_ops::ntt_stats_take;
+pub use merkle_ops::merkle_stats_take;
 
 /// Re-export CUDA FFI initialization functions from vortexstark.
 pub mod ffi {
