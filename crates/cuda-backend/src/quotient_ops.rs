@@ -29,6 +29,27 @@ use vortexstark::device::DeviceBuffer;
 
 use super::CudaBackend;
 
+// Per-call counters for the QuotientOps GPU path.
+pub static ACC_NUM_CALLS: std::sync::atomic::AtomicU64 =
+    std::sync::atomic::AtomicU64::new(0);
+pub static ACC_NUM_NANOS: std::sync::atomic::AtomicU64 =
+    std::sync::atomic::AtomicU64::new(0);
+pub static QC_CALLS: std::sync::atomic::AtomicU64 =
+    std::sync::atomic::AtomicU64::new(0);
+pub static QC_NANOS: std::sync::atomic::AtomicU64 =
+    std::sync::atomic::AtomicU64::new(0);
+
+pub fn quotient_stats_take() -> (u64, u64, u64, u64) {
+    use std::sync::atomic::Ordering::Relaxed;
+    (
+        ACC_NUM_CALLS.swap(0, Relaxed),
+        ACC_NUM_NANOS.swap(0, Relaxed),
+        QC_CALLS.swap(0, Relaxed),
+        QC_NANOS.swap(0, Relaxed),
+    )
+}
+
+
 fn secure_to_raw(v: SecureField) -> [u32; 4] {
     let arr = v.to_m31_array();
     [arr[0].0, arr[1].0, arr[2].0, arr[3].0]
@@ -82,6 +103,19 @@ fn get_or_compute_domain_points(
     new_arc
 }
 
+struct StatsGuard {
+    t0: std::time::Instant,
+    calls: &'static std::sync::atomic::AtomicU64,
+    nanos: &'static std::sync::atomic::AtomicU64,
+}
+impl Drop for StatsGuard {
+    fn drop(&mut self) {
+        use std::sync::atomic::Ordering::Relaxed;
+        self.calls.fetch_add(1, Relaxed);
+        self.nanos.fetch_add(self.t0.elapsed().as_nanos() as u64, Relaxed);
+    }
+}
+
 impl QuotientOps for CudaBackend {
     fn accumulate_numerators(
         columns: &[&CircleEvaluation<Self, BaseField, BitReversedOrder>],
@@ -89,6 +123,7 @@ impl QuotientOps for CudaBackend {
         accumulated_numerators_vec: &mut Vec<AccumulatedNumerators<Self>>,
         log_blowup_factor: u32,
     ) {
+        let _g = StatsGuard { t0: std::time::Instant::now(), calls: &ACC_NUM_CALLS, nanos: &ACC_NUM_NANOS };
         let _span =
             span!(Level::INFO, "GPU accumulate_numerators", n_batches = sample_batches.len())
                 .entered();
@@ -178,6 +213,7 @@ impl QuotientOps for CudaBackend {
         log_blowup_factor: u32,
         _twiddles: &TwiddleTree<Self>,
     ) -> SecureEvaluation<Self, BitReversedOrder> {
+        let _g = StatsGuard { t0: std::time::Instant::now(), calls: &QC_CALLS, nanos: &QC_NANOS };
         let _span = span!(
             Level::INFO,
             "GPU compute_quotients_combine",
