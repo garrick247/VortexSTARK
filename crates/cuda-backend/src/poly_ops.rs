@@ -262,6 +262,8 @@ fn get_fold_workspace(n: usize) -> Arc<Mutex<FoldWorkspace>> {
 struct EvalAtPointWorkspace {
     scratch1: DeviceBuffer<u32>,
     scratch2: DeviceBuffer<u32>,
+    /// Pooled buffer for folding factors. Sized for log2(n) factors of 4 u32s each.
+    factors: DeviceBuffer<u32>,
 }
 
 fn eval_at_point_workspace_cache()
@@ -290,9 +292,11 @@ fn get_eval_at_point_workspace(n: usize) -> Arc<Mutex<EvalAtPointWorkspace>> {
         }
     }
     let half_n = n / 2;
+    let log_n = n.trailing_zeros() as usize;
     let ws = EvalAtPointWorkspace {
         scratch1: DeviceBuffer::<u32>::alloc(half_n * 4),
         scratch2: DeviceBuffer::<u32>::alloc(half_n * 4),
+        factors: DeviceBuffer::<u32>::alloc(log_n * 4),
     };
     let arc = Arc::new(Mutex::new(ws));
     {
@@ -400,17 +404,25 @@ impl PolyOps for CudaBackend {
         }
         mappings.reverse();
 
-        // Upload folding factors to GPU as QM31 (4 u32s each)
+        // Build folding factors on CPU, then memcpy into the pooled device buffer.
         let mut factors_flat: Vec<u32> = Vec::with_capacity(mappings.len() * 4);
         for m in &mappings {
             let arr = m.to_m31_array();
             factors_flat.extend_from_slice(&[arr[0].0, arr[1].0, arr[2].0, arr[3].0]);
         }
-        let d_factors = DeviceBuffer::from_host(&factors_flat);
 
-        // Acquire pooled scratch buffers (avoids cudaMalloc/cudaFree per call).
+        // Acquire pooled scratch + factors buffers (avoids cudaMalloc/cudaFree per call).
         let ws_arc = get_eval_at_point_workspace(n);
         let ws = ws_arc.lock().unwrap();
+        unsafe {
+            vortexstark::cuda::ffi::cudaMemcpy(
+                ws.factors.as_ptr() as *mut std::ffi::c_void,
+                factors_flat.as_ptr() as *const std::ffi::c_void,
+                factors_flat.len() * 4,
+                vortexstark::cuda::ffi::MEMCPY_H2D,
+            );
+        }
+        let d_factors = &ws.factors;
 
         let mut result = [0u32; 4];
         let _t0 = std::time::Instant::now();
