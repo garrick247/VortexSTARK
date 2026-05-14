@@ -306,27 +306,36 @@ impl QuotientOps for CudaBackend {
             ffi::cuda_device_sync();
         }
 
-        // Lift: for each of the 4 SoA channels, interpolate over eval_subdomain
-        // (IFFT) and evaluate over eval_domain (FFT). CudaBackend::interpolate
-        // and evaluate look up GPU twiddles via the internal coset cache, so the
-        // passed `_twiddles` argument is unused.
+        // Lift: 4 SoA channels share eval_subdomain (input). Batched IFFT
+        // collapses the 4 single-poly interpolates into one launch. Keep evaluate
+        // single-poly because eval_domain shape may differ from the canonical
+        // domain that evaluate_polynomials synthesizes.
         use super::column::CudaColumn;
         use stwo::prover::poly::circle::PolyOps;
 
         let dummy_twiddles = CudaBackend::precompute_twiddles(eval_subdomain.half_coset);
-        let lift = |sub_buf: DeviceBuffer<u32>| -> CudaColumn<BaseField> {
-            let col = CudaColumn::<BaseField>::from_device_buffer(sub_buf, n_rows as usize);
-            let circle_eval = CircleEvaluation::<CudaBackend, BaseField, BitReversedOrder>::new(
-                eval_subdomain,
-                col,
-            );
-            let poly = CudaBackend::interpolate(circle_eval, &dummy_twiddles);
+        let evals: Vec<CircleEvaluation<CudaBackend, BaseField, BitReversedOrder>> =
+            [out0, out1, out2, out3]
+                .into_iter()
+                .map(|buf| {
+                    let col = CudaColumn::<BaseField>::from_device_buffer(buf, n_rows as usize);
+                    CircleEvaluation::<CudaBackend, BaseField, BitReversedOrder>::new(
+                        eval_subdomain,
+                        col,
+                    )
+                })
+                .collect();
+
+        let polys = CudaBackend::interpolate_columns(evals, &dummy_twiddles);
+
+        let mut poly_iter = polys.into_iter();
+        let mut lift_col = || -> CudaColumn<BaseField> {
+            let poly = poly_iter.next().expect("lift poly");
             let evaluated = CudaBackend::evaluate(&poly, eval_domain, &dummy_twiddles);
             evaluated.values
         };
-
         let lifted_cols = SecureColumnByCoords {
-            columns: [lift(out0), lift(out1), lift(out2), lift(out3)],
+            columns: [lift_col(), lift_col(), lift_col(), lift_col()],
         };
         SecureEvaluation::new(eval_domain, lifted_cols)
     }
