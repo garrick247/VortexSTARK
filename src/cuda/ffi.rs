@@ -236,6 +236,24 @@ unsafe extern "C" {
     pub fn cuda_stwo_ntt_evaluate(d_data: *mut u32, d_twiddles: *const u32, n: u32);
     /// Inverse NTT using stwo's flat twiddle buffer (includes 1/n scaling).
     pub fn cuda_stwo_ntt_interpolate(d_data: *mut u32, d_itwiddles: *const u32, n: u32);
+    /// Batched forward NTT: process N polys of the same size in fewer kernel
+    /// launches than N separate cuda_stwo_ntt_evaluate calls. v1 uses generic
+    /// per-layer kernels (no radix-4, no fused shared-mem); wins via launch
+    /// overhead amortization when n_cols is decent.
+    pub fn cuda_stwo_ntt_batch_evaluate(
+        col_ptrs: *const *mut u32,
+        d_twiddles: *const u32,
+        n: u32,
+        n_cols: u32,
+    );
+    /// Batched inverse NTT (interpolate) with 1/n scaling. Same shape as
+    /// cuda_stwo_ntt_batch_evaluate.
+    pub fn cuda_stwo_ntt_batch_interpolate(
+        col_ptrs: *const *mut u32,
+        d_itwiddles: *const u32,
+        n: u32,
+        n_cols: u32,
+    );
 }
 
 // Circle NTT kernels (original VortexSTARK format)
