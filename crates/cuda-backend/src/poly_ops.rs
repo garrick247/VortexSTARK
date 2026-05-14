@@ -659,6 +659,174 @@ impl PolyOps for CudaBackend {
         CircleEvaluation::new(domain, values)
     }
 
+    /// Batched evaluate over many polys. Groups by target log_size and
+    /// dispatches the batched stwo-NTT kernel per group. For polys at
+    /// unique log_sizes (group size 1) we fall back to per-poly Self::evaluate.
+    fn evaluate_polynomials(
+        polynomials: stwo::core::ColumnVec<stwo::prover::poly::circle::CircleCoefficients<Self>>,
+        log_blowup_factor: u32,
+        twiddles: &stwo::prover::poly::twiddles::TwiddleTree<Self>,
+        store_polynomials_coefficients: bool,
+        _pool: &stwo::prover::mempool::BaseColumnPool<Self>,
+    ) -> Vec<stwo::prover::Poly<Self>>
+    where
+        Self: stwo::prover::backend::Backend,
+    {
+        use stwo::core::circle::Coset;
+        use stwo::core::fields::m31::BaseField;
+        use stwo::core::poly::circle::CircleDomain;
+        use stwo::prover::poly::circle::{CircleCoefficients, CircleEvaluation};
+        use stwo::prover::poly::BitReversedOrder;
+        use stwo::prover::Poly;
+        use super::column::CudaColumn;
+        use vortexstark::cuda::ffi;
+        use vortexstark::device::DeviceBuffer;
+
+        // Group polynomial indices by target log_size = log_size() + log_blowup_factor.
+        let n = polynomials.len();
+        let mut groups: std::collections::HashMap<u32, Vec<usize>> =
+            std::collections::HashMap::new();
+        for (i, p) in polynomials.iter().enumerate() {
+            let target_log = p.log_size() + log_blowup_factor;
+            groups.entry(target_log).or_default().push(i);
+        }
+
+        // Output slot per input index. Filled below.
+        let mut outputs: Vec<Option<CircleEvaluation<Self, BaseField, BitReversedOrder>>> =
+            (0..n).map(|_| None).collect();
+
+        // Suppress the `twiddles` unused warning -- we use our internal cache instead.
+        let _ = twiddles;
+
+        for (target_log, indices) in &groups {
+            let target_n = 1usize << target_log;
+            let n_cols = indices.len();
+
+            // CircleDomain at target_log_size.
+            let domain = CircleDomain::new(Coset::half_odds(*target_log - 1));
+            let (d_twiddles, _d_itwiddles) = cached_gpu_twiddles(&domain.half_coset);
+
+            // Allocate output buffers, zero-fill, and copy poly coefficients to
+            // the low half (extend semantics). Keep buffers in this Vec so they
+            // stay alive across the kernel launch.
+            let mut out_bufs: Vec<DeviceBuffer<u32>> = Vec::with_capacity(n_cols);
+            let mut col_ptrs: Vec<*mut u32> = Vec::with_capacity(n_cols);
+            for &idx in indices.iter() {
+                let poly = &polynomials[idx];
+                let old_len = poly.coeffs.len();
+                let mut buf = DeviceBuffer::<u32>::alloc(target_n);
+                buf.zero();
+                unsafe {
+                    ffi::cudaMemcpy(
+                        buf.as_mut_ptr() as *mut std::ffi::c_void,
+                        poly.coeffs.buf.as_ptr() as *const std::ffi::c_void,
+                        (old_len * 4) as usize,
+                        ffi::MEMCPY_D2D,
+                    );
+                }
+                col_ptrs.push(buf.as_mut_ptr());
+                out_bufs.push(buf);
+            }
+
+            unsafe {
+                ffi::cuda_stwo_ntt_batch_evaluate(
+                    col_ptrs.as_ptr(),
+                    d_twiddles.as_ptr(),
+                    target_n as u32,
+                    n_cols as u32,
+                );
+                ffi::cuda_device_sync();
+            }
+
+            // Wrap each output buffer as a CircleEvaluation, place in outputs slot.
+            // CRITICAL: use into_iter().zip to preserve out_bufs[i] <-> indices[i]
+            // pairing. swap_remove(0) scrambles order after the first removal.
+            for (buf, &idx) in out_bufs.into_iter().zip(indices.iter()) {
+                let col = CudaColumn::<BaseField>::from_device_buffer(buf, target_n);
+                outputs[idx] = Some(CircleEvaluation::new(domain, col));
+            }
+        }
+
+        // Reassemble Vec<Poly>. Take ownership of polynomials so we can move
+        // coeffs into the resulting Poly when requested.
+        let mut polynomials = polynomials;
+        let mut result: Vec<Poly<Self>> = Vec::with_capacity(n);
+        for i in 0..n {
+            let eval = outputs[i].take().expect("output slot must be filled");
+            let coeffs = if store_polynomials_coefficients {
+                Some(std::mem::replace(
+                    &mut polynomials[i],
+                    CircleCoefficients::new(CudaColumn::<BaseField>::from_device_buffer(
+                        DeviceBuffer::<u32>::alloc(1), 1,
+                    )),
+                ))
+            } else {
+                None
+            };
+            result.push(Poly::new(coeffs, eval));
+        }
+        result
+    }
+
+    /// Batched interpolate over many columns. Mirrors evaluate_polynomials but
+    /// for the inverse NTT direction. Groups by log_size (= columns[i].domain.log_size())
+    /// and runs the batched inverse kernel per group. In-place: input buffers become
+    /// output coefficient buffers (after IFFT + 1/n scale).
+    fn interpolate_columns(
+        columns: Vec<stwo::prover::poly::circle::CircleEvaluation<Self, stwo::core::fields::m31::BaseField, stwo::prover::poly::BitReversedOrder>>,
+        twiddles: &stwo::prover::poly::twiddles::TwiddleTree<Self>,
+    ) -> Vec<stwo::prover::poly::circle::CircleCoefficients<Self>> {
+        use stwo::prover::poly::circle::CircleCoefficients;
+        use vortexstark::cuda::ffi;
+
+        let _ = twiddles;  // we use our internal twiddle cache
+
+        // Group column indices by domain.log_size().
+        let n = columns.len();
+        let mut groups: std::collections::HashMap<u32, Vec<usize>> =
+            std::collections::HashMap::new();
+        for (i, col) in columns.iter().enumerate() {
+            groups.entry(col.domain.log_size()).or_default().push(i);
+        }
+
+        let mut columns: Vec<Option<stwo::prover::poly::circle::CircleEvaluation<Self, stwo::core::fields::m31::BaseField, stwo::prover::poly::BitReversedOrder>>> = columns.into_iter().map(Some).collect();
+        let mut outputs: Vec<Option<CircleCoefficients<Self>>> = (0..n).map(|_| None).collect();
+
+        for (log_size, indices) in &groups {
+            let size = 1usize << log_size;
+            let n_cols = indices.len();
+
+            // Build the half_coset for twiddle lookup (matches single-poly interpolate).
+            let domain = columns[indices[0]].as_ref().expect("slot live").domain;
+            let (_d_twiddles, d_itwiddles) = cached_gpu_twiddles(&domain.half_coset);
+
+            // Gather mutable device pointers from the input CudaColumns. The kernel
+            // works in-place; we move the buffers out of the inputs at the end.
+            let mut col_ptrs: Vec<*mut u32> = Vec::with_capacity(n_cols);
+            for &idx in indices.iter() {
+                col_ptrs.push(columns[idx].as_mut().expect("slot live").values.buf.as_mut_ptr());
+            }
+
+            unsafe {
+                ffi::cuda_stwo_ntt_batch_interpolate(
+                    col_ptrs.as_ptr(),
+                    d_itwiddles.as_ptr(),
+                    size as u32,
+                    n_cols as u32,
+                );
+                ffi::cuda_device_sync();
+            }
+
+            for &idx in indices.iter() {
+                let eval = columns[idx].take().expect("slot live");
+                outputs[idx] = Some(CircleCoefficients::new(eval.values));
+            }
+            let _ = size;
+        }
+
+        outputs.into_iter().map(|c| c.expect("every slot filled")).collect()
+    }
+
     fn evaluate_into(
         poly: &CircleCoefficients<Self>,
         domain: CircleDomain,

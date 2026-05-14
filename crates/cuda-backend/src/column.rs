@@ -75,6 +75,28 @@ impl Column<BaseField> for CudaColumn<BaseField> {
         }
         BaseField::from_u32_unchecked(val[0])
     }
+    fn gather(&self, positions: &[usize]) -> Vec<BaseField> {
+        let n = positions.len();
+        if n == 0 { return Vec::new(); }
+
+        // Cast usize -> u32 positions for the gather kernel.
+        let idx_host: Vec<u32> = positions.iter().map(|&p| p as u32).collect();
+        let d_idx = vortexstark::device::DeviceBuffer::<u32>::from_host(&idx_host);
+        let mut d_out = vortexstark::device::DeviceBuffer::<u32>::alloc(n);
+
+        unsafe {
+            ffi::cuda_gather_u32_forge(
+                self.buf.as_ptr(),
+                d_idx.as_ptr(),
+                d_out.as_mut_ptr(),
+                n as u32,
+                self.len as u32,
+            );
+        }
+
+        let host = d_out.to_host();
+        host.into_iter().map(BaseField::from_u32_unchecked).collect()
+    }
 
     fn set(&mut self, index: usize, value: BaseField) {
         assert!(index < self.len);
@@ -285,6 +307,35 @@ impl Column<Blake2sHash> for CudaColumn<Blake2sHash> {
             bytes[i*4..i*4+4].copy_from_slice(&w.to_le_bytes());
         }
         Blake2sHash(bytes)
+    }
+    fn gather(&self, positions: &[usize]) -> Vec<Blake2sHash> {
+        let n = positions.len();
+        if n == 0 { return Vec::new(); }
+
+        // For Blake2sHash, the underlying DeviceBuffer<u32> stores 8 u32s per hash.
+        // src_len is in u32 units; idx is per-hash, kernel handles the 8x stride internally.
+        let idx_host: Vec<u32> = positions.iter().map(|&p| p as u32).collect();
+        let d_idx = vortexstark::device::DeviceBuffer::<u32>::from_host(&idx_host);
+        let mut d_out = vortexstark::device::DeviceBuffer::<u32>::alloc(n * 8);
+
+        unsafe {
+            ffi::cuda_gather_u256_forge(
+                self.buf.as_ptr(),
+                d_idx.as_ptr(),
+                d_out.as_mut_ptr(),
+                n as u32,
+                (self.len * 8) as u32,
+            );
+        }
+
+        let host = d_out.to_host();
+        positions.iter().enumerate().map(|(i, _)| {
+            let mut bytes = [0u8; 32];
+            for j in 0..8 {
+                bytes[j*4..j*4+4].copy_from_slice(&host[i * 8 + j].to_le_bytes());
+            }
+            Blake2sHash(bytes)
+        }).collect()
     }
 
     fn set(&mut self, index: usize, value: Blake2sHash) {
