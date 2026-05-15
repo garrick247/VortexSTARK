@@ -80,6 +80,34 @@ Fixes (today's PRs, all merged unless noted):
 
 The pattern these all share: **per-element APIs on top of device memory create O(N) cudaMemcpy syscall load that dominates wall-clock when N is large.** GPU backends implementing single-element traits need to override every "iterate the trait method" call site with a batched variant.
 
+### Scaling notes — speedup is not uniform across the suite
+
+The 6.7× median compresses two distinct regimes. Programs by warm-prove speedup:
+
+| Program | VM steps | CUDA warm | Speedup |
+|---|---:|---:|---:|
+| `ret_opcode` | 15 | 0.367 s | **8.1×** |
+| `range_check_bits_128` | 323 | 0.386 s | **8.1×** |
+| `bitwise_builtin` | 673 | 0.394 s | **8.0×** |
+| `range_check_bits_96` | 323 | 0.385 s | **7.9×** |
+| `add_mod_builtin` | 10423 | 0.400 s | **7.4×** |
+| `poseidon_builtin` | 239 | 0.468 s | **7.1×** |
+| `mul_mod_builtin` | 10423 | 0.447 s | **6.6×** |
+| `poseidon_aggregator` | 6892 | 0.461 s | **6.1×** |
+| `all_opcode_components` | 1495 | 0.540 s | **5.3×** |
+| `pedersen_builtin` | 205 | 1.442 s | **3.7×** |
+| `pedersen_aggregator` | 5872 | 1.468 s | **3.6×** |
+| **`all_builtins`** | **9158** | **2.076 s** | **2.7×** |
+
+VM step count does not predict speedup. `add_mod_builtin` at 10423 steps lands at 7.4× while `all_builtins` at 9158 steps lands at 2.7×. The pattern is **component diversity**: programs that exercise one dominant constraint kind amortize the GPU's per-component-launch overhead well; programs that exercise the full builtin set pay per-launch overhead × ~20+ distinct constraint kernels and lose ground.
+
+The pedersen pair is a separate floor at ~3.5×: a single component is exercised, but it's the Pedersen curve op, which is bottlenecked by serial big-int arithmetic on both backends — we do not (yet) have a custom Pedersen GPU kernel, so both backends share roughly the same scalar-multiply work.
+
+**Production implication.** Real Cairo workloads tend to be dominated by one or two heavy components (hash chains, range checks, signature verification). For those, the 6–8× regime is the right expectation. For workloads that look like the kitchen sink (`all_builtins`), expect 2.7–4× until per-component launch overhead is parallelized across CUDA streams.
+
+The current bottleneck for low-speedup programs is **not** any single span — it is the cumulative cost of small per-component kernels in the `Composition` and trace-commit phases. See `next.md` in the development memory for the breakdown.
+
+
 ### Methodology notes for reproducers
 
 ```
