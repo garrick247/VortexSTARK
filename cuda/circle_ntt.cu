@@ -230,6 +230,51 @@ __global__ void fold_level_kernel(
     out_data[tid * 4 + 3] = result.v[3];
 }
 
+// Tail-fused fold: handles the bottom log2(half_n_start) + 1 levels in
+// one launch using shared memory. Replaces a chain of fold_level_kernel
+// launches whose individual GPU time is dominated by per-call launch
+// overhead. Eval-at-point calls drop from log_n launches to
+// (log_n - log2(half_n_start)) launches + 1 tail launch.
+__global__ void fold_tail_kernel(
+    const uint32_t* __restrict__ in_data,
+    uint32_t* __restrict__ out_data,
+    const uint32_t* __restrict__ factors,
+    uint32_t half_n_start,
+    uint32_t n_levels
+) {
+    extern __shared__ uint32_t smem[];
+    uint32_t tid = threadIdx.x;
+
+    uint32_t load_total = 2u * half_n_start * 4u;
+    for (uint32_t i = tid; i < load_total; i += blockDim.x) {
+        smem[i] = in_data[i];
+    }
+    __syncthreads();
+
+    uint32_t cur_half_n = half_n_start;
+    for (uint32_t level = 0; level < n_levels; level++) {
+        if (tid < cur_half_n) {
+            uint32_t ai = tid * 4;
+            uint32_t bi = (tid + cur_half_n) * 4;
+            QM31 a = {{smem[ai], smem[ai+1], smem[ai+2], smem[ai+3]}};
+            QM31 bv = {{smem[bi], smem[bi+1], smem[bi+2], smem[bi+3]}};
+            QM31 f = {{factors[level*4+0], factors[level*4+1],
+                       factors[level*4+2], factors[level*4+3]}};
+            QM31 result = qm31_add(a, qm31_mul(bv, f));
+            smem[ai+0] = result.v[0];
+            smem[ai+1] = result.v[1];
+            smem[ai+2] = result.v[2];
+            smem[ai+3] = result.v[3];
+        }
+        __syncthreads();
+        cur_half_n >>= 1;
+    }
+
+    if (tid < 4) {
+        out_data[tid] = smem[tid];
+    }
+}
+
 // Bit-reverse permutation
 __global__ void bit_reverse_m31_kernel(uint32_t* data, uint32_t log_n, uint32_t n) {
     uint32_t i = blockIdx.x * blockDim.x + threadIdx.x;
@@ -450,7 +495,14 @@ void cuda_eval_at_point(
     uint32_t* out_buf = d_scratch2;
     uint32_t cur_n = half_n;
 
-    for (uint32_t level = 1; level < log_n; level++) {
+    // Tail-fusion threshold: when cur_n drops to TAIL_HALF_N, switch from
+    // per-level launches to one fold_tail_kernel launch that runs the
+    // remaining levels in shared memory. TAIL_HALF_N must be a power of 2
+    // <= max threads per block (1024). 512 keeps shared-mem at 16 KB.
+    const uint32_t TAIL_HALF_N = 512u;
+    uint32_t level = 1;
+
+    while (cur_n > TAIL_HALF_N) {
         half_n = cur_n / 2;
         blocks = (half_n + threads - 1) / threads;
         fold_level_kernel<<<blocks, threads>>>(
@@ -462,6 +514,23 @@ void cuda_eval_at_point(
         in_buf = out_buf;
         out_buf = tmp_ptr;
         cur_n = half_n;
+        level++;
+    }
+
+    if (cur_n > 1) {
+        // cur_n must be a power of 2 (poly length is). Compute n_levels
+        // = log2(cur_n).
+        uint32_t n_levels = 0;
+        for (uint32_t t = cur_n; t > 1; t >>= 1) n_levels++;
+        uint32_t half_n_start = cur_n / 2;
+        uint32_t tail_threads = half_n_start;
+        uint32_t smem_bytes = 2u * half_n_start * 4u * sizeof(uint32_t);
+        fold_tail_kernel<<<1, tail_threads, smem_bytes>>>(
+            in_buf, in_buf,
+            d_folding_factors + level * 4,
+            half_n_start,
+            n_levels
+        );
     }
 
     cudaMemcpy(h_result, in_buf, 4 * sizeof(uint32_t), cudaMemcpyDeviceToHost);
