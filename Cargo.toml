@@ -173,4 +173,4 @@ zstd = { version = "0.13", optional = true }
 cc = "1.2"
 
 [dev-dependencies]
-stwo = { git = "https://github.com/garrick247/stwo-fork.git", rev = "483f8c94c02bc7c4eaf128f2cd2269dd6f1a5f6c" }
+stwo = { git = "https://github.com/garrick247/stwo-fork.git", rev = "5c41bf4a379df67e6de40776b10ba4c23900c0f4" }
