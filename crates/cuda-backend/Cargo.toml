@@ -19,8 +19,8 @@ forge-bit-reverse = ["vortexstark/forge-bit-reverse"]
 forge-gather = ["vortexstark/forge-gather"]
 
 [dependencies]
-stwo = { git = "https://github.com/garrick247/stwo-fork.git", rev = "483f8c94c02bc7c4eaf128f2cd2269dd6f1a5f6c", features = ["prover"] }
-stwo-constraint-framework = { git = "https://github.com/garrick247/stwo-fork.git", rev = "483f8c94c02bc7c4eaf128f2cd2269dd6f1a5f6c", features = ["prover"] }
+stwo = { git = "https://github.com/garrick247/stwo-fork.git", rev = "5c41bf4a379df67e6de40776b10ba4c23900c0f4", features = ["prover"] }
+stwo-constraint-framework = { git = "https://github.com/garrick247/stwo-fork.git", rev = "5c41bf4a379df67e6de40776b10ba4c23900c0f4", features = ["prover"] }
 vortexstark = { path = "../.." }
 serde = { version = "1.0", features = ["derive"] }
 itertools = "0.14.0"

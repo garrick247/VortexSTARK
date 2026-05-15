@@ -1686,7 +1686,7 @@ checksum = "7da8b5736845d9f2fcb837ea5d9e2628564b3b043a70948a3f0b778838c5fb4f"
 [[package]]
 name = "stwo"
 version = "2.2.0"
-source = "git+https://github.com/garrick247/stwo-fork.git?rev=483f8c94c02bc7c4eaf128f2cd2269dd6f1a5f6c#483f8c94c02bc7c4eaf128f2cd2269dd6f1a5f6c"
+source = "git+https://github.com/garrick247/stwo-fork.git?rev=5c41bf4a379df67e6de40776b10ba4c23900c0f4#5c41bf4a379df67e6de40776b10ba4c23900c0f4"
 dependencies = [
  "blake2",
  "blake3",
@@ -1714,7 +1714,7 @@ dependencies = [
 [[package]]
 name = "stwo-constraint-framework"
 version = "2.2.0"
-source = "git+https://github.com/garrick247/stwo-fork.git?rev=483f8c94c02bc7c4eaf128f2cd2269dd6f1a5f6c#483f8c94c02bc7c4eaf128f2cd2269dd6f1a5f6c"
+source = "git+https://github.com/garrick247/stwo-fork.git?rev=5c41bf4a379df67e6de40776b10ba4c23900c0f4#5c41bf4a379df67e6de40776b10ba4c23900c0f4"
 dependencies = [
  "hashbrown 0.17.0",
  "itertools 0.12.1",
