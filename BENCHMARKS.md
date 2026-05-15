@@ -1,5 +1,105 @@
 # VortexSTARK Benchmark Artifact
 
+## CHECKPOINT: stwo-cairo End-to-End Sweep, 12 Programs (2026-05-14)
+
+### Commit
+```
+garrick247/VortexSTARK    main @ f4d2bb6  (PRs #13/#14/#15/#17/#18 landed)
+garrick247/stwo-fork      cuda-backend-dev-head @ post-#1  (Column::gather + commitment.decommit batching)
+garrick247/stwo-cairo     main @ 4c54e2e5  (prover bumps VortexSTARK rev)
+```
+
+### What this benchmark covers
+End-to-end Cairo prove + verify on the 12 `test_data/` programs that ship with `stwo-cairo`, using the same harness pattern on both backends (`run_and_prove_cuda` and the newly-added `run_and_prove_iter` for the CPU path). Each program is run with `--iterations 3 --verify`; cold = first iter, warm = third iter. `bench-gpu.sh` evicts any other GPU resident (Ollama / Qwen) before each run so the GPU is uncontested.
+
+All 12 programs `PROOF VALID` on both backends. The CUDA-side proofs are byte-identical with the SimdBackend proofs for the same input.
+
+### Hardware / Toolkit
+```
+GPU:          NVIDIA GeForce RTX 5090 (32 GB GDDR7, SM 12.0 Blackwell)
+Driver:       595.58.03
+CUDA:         13.2 (V13.2.78, built 2026-03-19)
+Rust:         1.95 (stable, 2026-04-14)
+CPU:          Intel Core Ultra 9 285K (24C/24T, max 5.8 GHz)
+RAM:          64 GB DDR5
+OS:           Ubuntu 25.10 "questing", kernel 6.17.0-23-generic
+nvcc flags:   -O3 -gencode arch=compute_89,code=sm_89 -gencode arch=compute_120,code=sm_120
+PoW params:   pow_bits=26, log_blowup_factor=1, n_queries=70 (standard Cairo prover config)
+```
+
+### Warm-prove speedup vs CpuBackend (SimdBackend with `target-cpu=native` release build)
+
+| Program                                      | CPU warm | CUDA warm | Speedup |
+|----------------------------------------------|---------:|----------:|--------:|
+| `test_prove_verify_ret_opcode`               |   3.08 s |   0.368 s |  **8.4x** |
+| `test_prove_verify_bitwise_builtin`          |   3.12 s |   0.395 s |  **7.9x** |
+| `test_prove_verify_range_check_bits_128`     |   3.08 s |   0.400 s |  **7.7x** |
+| `test_prove_verify_range_check_bits_96`      |   2.93 s |   0.395 s |  **7.4x** |
+| `test_prove_verify_add_mod_builtin`          |   2.88 s |   0.403 s |  **7.2x** |
+| `test_prove_verify_poseidon_builtin`         |   3.31 s |   0.482 s |  **6.9x** |
+| `test_prove_verify_mul_mod_builtin`          |   2.90 s |   0.445 s |  **6.5x** |
+| `test_poseidon_aggregator`                   |   2.83 s |   0.469 s |  **6.0x** |
+| `test_prove_verify_all_opcode_components`    |   2.89 s |   0.583 s |  **5.0x** |
+| `test_prove_verify_pedersen_builtin`         |   5.37 s |   1.523 s |  **3.5x** |
+| `test_pedersen_aggregator`                   |   5.34 s |   1.504 s |  **3.5x** |
+| `test_prove_verify_all_builtins`             |   5.64 s |   2.057 s |  **2.7x** |
+
+**Median 6.7x. Range 2.7x – 8.4x.**
+
+The lower end (`all_builtins`, the pedersen pair) corresponds to programs whose constraint mix is dominated by per-component GPU launches and Merkle commit work where each individual kernel is short and launch overhead is a larger fraction of the budget. The high end is programs where a single constraint kind dominates and the GPU kernel runs long enough to fully amortize launch cost.
+
+### Cold-prove comparison
+
+Cold prove includes one-time CUDA driver / runtime initialization, JIT compilation of any newly-encountered kernel variants, and a fresh allocator state. It is **not** a steady-state metric — a long-running proof service amortizes it across many proves.
+
+| Program                                  | CPU cold | CUDA cold |
+|------------------------------------------|---------:|----------:|
+| `test_prove_verify_ret_opcode`           |   4.24 s |   3.72 s  |
+| `test_prove_verify_poseidon_builtin`     |   4.64 s |   ~3.28 s |
+| `test_prove_verify_all_builtins`         |   7.01 s |   8.06 s  |
+| `test_pedersen_aggregator`               |   6.88 s |   7.51 s  |
+
+CUDA cold-prove can be slightly slower than CPU on the larger programs because of one-time GPU initialization plus first-iteration kernel JIT (~1-2 s of GPU warm-up tax). PR #18 closed ~20% of the gap on `all_builtins` (10.0 s → 8.06 s) by pooling the eval_at_point folding-factors buffer; the rest is inherent to the cold path.
+
+### How we got here today (2026-05-14)
+
+This sweep is the result of a single session's optimization work. Starting baseline (this morning) had `all_builtins` warm at **4.06 s** — a 1.38x outlier where all other programs were already at 3-5x. The bottleneck was identified in two layers:
+
+1. **`Tree decommit (all trees)` = 1.94 s warm (48% of total)** — root cause: `CudaColumn::at(idx)` does one `cudaMemcpy D2H` per element. `stwo`'s `commitment.decommit` called this ~300k times (~150 columns × ~2000 queries plus Merkle layer walks).
+2. **Per-call cudaMemcpy overhead in `eval_at_point`** — each call did `DeviceBuffer::from_host` for 88 bytes of folding factors, paying `cudaMalloc` + `cudaFree` × 2215 calls.
+
+Fixes (today's PRs, all merged unless noted):
+
+| Change | Repo / PR | Effect |
+|--------|-----------|--------|
+| Batched stwo NTT (v1 + v2 + `interpolate_columns` + `quotient_ops::lift`) | VortexSTARK #17 | Architectural cleanup; perf wash because NTT was already not the bottleneck |
+| `Column::gather` trait method | stwo-fork #1 | Default impl is per-element `at()` (no behavior change for CPU/SIMD) |
+| `commitment.decommit` batched gather (queried-values + Merkle layer walk) | stwo-fork #1 | Refactor to collect positions then issue one `gather()` per column / per layer |
+| `CudaColumn::gather` overrides via `cuda_gather_u32/u256_forge` kernels | VortexSTARK #17 | -49% warm prove on all_builtins; -23 to -52% across all 12 |
+| Pool `eval_at_point` folding-factors buffer in workspace cache | VortexSTARK #18 | -19% cold prove on all_builtins; warm unchanged within noise |
+
+The pattern these all share: **per-element APIs on top of device memory create O(N) cudaMemcpy syscall load that dominates wall-clock when N is large.** GPU backends implementing single-element traits need to override every "iterate the trait method" call site with a batched variant.
+
+### Methodology notes for reproducers
+
+```
+ssh linux 'cd /home/garrick/stwo-cairo/stwo_cairo_prover &&
+  cargo build --release -p stwo-cairo-dev-utils --bin run_and_prove_cuda --features cuda-backend &&
+  cargo build --release -p stwo-cairo-dev-utils --bin run_and_prove_iter --features cuda-backend &&
+  for prog in test_data/test_*; do
+    /home/garrick/bin/bench-gpu.sh ./target/release/run_and_prove_cuda \
+      --program $prog/compiled.json --iterations 3 --verify
+    /home/garrick/bin/bench-gpu.sh ./target/release/run_and_prove_iter \
+      --program $prog/compiled.json --iterations 3 --verify
+  done'
+```
+
+- The `run_and_prove_iter` binary is the CPU-side mirror of `run_and_prove_cuda` (same iterations flag, same `[summary]` line). It runs `stwo_cairo_prover::prove_cairo::<Blake2sMerkleChannel>` on `SimdBackend` with `target-cpu=native`.
+- `bench-gpu.sh` evicts Ollama / Qwen via `keep_alive:0` before each run so the GPU is not contended.
+- All 12 programs verify with `PROOF VALID` on both backends. CUDA proofs are byte-identical with the SimdBackend reference for the same input — the gather kernels are pure value reads with no field arithmetic, and the NTT batching uses the same butterfly math as the single-poly path.
+
+
+
 ## CHECKPOINT: CudaBackend Full-GPU (2026-04-03)
 
 ### Commit
