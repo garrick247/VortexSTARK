@@ -34,7 +34,7 @@ Source-available under [BSL 1.1](LICENSE), converts to Apache 2.0 on **2029-03-2
 - **RPO-M31 hash**: Circle STARK–native hash (eprint 2024/1635), 3.5M hashes/sec at log_n=28 (14 rows/perm, 24 cols)
 - **FRI**: Circle fold + line folds, GPU-resident decommitment, all fold equations verified
 
-### Benchmarked (RTX 5090, CUDA 13.2, driver 595.79)
+### Benchmarked (RTX 5090, CUDA 13.2, driver 595.58.03)
 
 Default build, `BLOWUP_BITS=2`, 160-bit security, N_QUERIES=80, PoW=26 bits:
 
@@ -90,7 +90,7 @@ All Cairo VM numbers include 34 columns, 35 constraints, full LogUp+RC memory ta
 - **Felt252 arithmetic**: VM operates over M31 (2^31 − 1). Three layers of detection prevent silent misproofs:
   1. Bytecode values wider than u64 are rejected at load (`ProveError::Felt252Overflow`).
   2. Any `res_add` / `res_mul` operation on operands ≥ M31 bumps `hint_ctx.execution_overflows`; the prover rejects with `ProveError::ExecutionRangeViolation` if non-zero.
-  3. Pass-through of > M31 values (memory moves, syscall blobs, dict writes) is **intentionally allowed**: trace columns store low-31 bits but the full felt precision is preserved via the `dict_side_table` (Phase 2, Blake2s-committed, mixed into Fiat-Shamir). The low-31 ↔ exec-log link is verified at `prover.rs:3342–3363`. So a program can carry felt252 values through memory and dicts without triggering rejection, and the proof binds the full 252-bit value at every dict access.
+  3. Pass-through of > M31 values (memory moves, syscall blobs, dict writes) is **intentionally allowed**: trace columns store low-31 bits but the full felt precision is preserved via the `dict_side_table` (Phase 2, Blake2s-committed, mixed into Fiat-Shamir). The low-31 ↔ exec-log link is verified at `prover.rs:3515–3556` (verifier-side `cairo_verify` recomputes `exec_key_new_sum` from `dict_exec_data` and rejects if it does not equal `proof.dict_link_final`). So a program can carry felt252 values through memory and dicts without triggering rejection, and the proof binds the full 252-bit value at every dict access.
   A program that performs M31-overflowing **arithmetic** is correctly rejected; a program that just moves felts around is correctly proven at full precision.
 - **Starknet syscalls**: All 9 syscall selectors fully implemented. `CallContract` and `LibraryCall` execute registered callees in-process via `HintContext::register_contract` — retdata is written back into the caller's response buffer with nesting up to depth 8. Unregistered targets return empty retdata. `Deploy` returns a deterministic mock address (`salt XOR class_hash`). All syscall state (events, calls, deployed contracts, L1 messages) recorded in `SyscallState` and available after proving.
 - **Dict consistency proofs**: Dict read/write execution is fully functional. An execution-side chain consistency check runs at prove time (`ProveError::DictConsistencyViolation`). The S_dict step-transition LogUp (C34) links main trace dict columns to an authenticated exec trace; verifier checks `dict_link_final == exec_key_new_sum`. Soundness holds against a malicious prover for dict-heavy programs.
@@ -169,7 +169,7 @@ Requires: Rust 1.85+ (stable), CUDA 13.0+, RTX 5090 (SM 12.0) or RTX 4090 (SM 8.
 ```bash
 cargo build --release
 cargo test --release --workspace -- --test-threads=1
-# Workspace totals: 396 lib + 49 vortex-cuda-backend + 35 integration = 480 pass, 0 fail, 3 #[ignore]
+# Workspace totals: 396 lib + 49 vortex-cuda-backend + 35 integration = 480 pass, 0 fail, 5 #[ignore] (3 lib + 1 integration live-RPC opt-in + 1 doctest)
 cargo run --release --bin full_benchmark
 cargo run --release --bin gpu_bench     # pre-flight checks + per-section GPU telemetry
 ```
@@ -178,7 +178,7 @@ The default build enables all 9 Forge-emitted kernel paths (`forge-ntt`, `forge-
 
 ## Tests
 
-396 lib + 49 vortex-cuda-backend + 35 integration = **480 total (480 pass, 0 fail, 3 marked `#[ignore]` for benchmark/live-RPC opt-in)** covering: M31/CM31/QM31 field arithmetic, Circle NTT, Merkle tree (commit, auth paths, tiled, SoA4), FRI (fold, circle fold, deterministic), STARK prover + verifier (multiple sizes, tamper detection), Cairo VM (decoder, executor, Fibonacci, constraints, LogUp, range checks, instruction decomposition), Poseidon, Pedersen (Stark252 field, EC ops, GPU vs CPU), Bitwise (memory segment, trace generation, verifier native recompute against Fiat-Shamir-bound (x, y), prove/verify round-trip, tamper detection, 32-bit input acceptance, forged-row rejection), LogUp/RC soundness (memory table commitment, cancellation check, RC counts commitment), OODS quotient formula correctness, GPU constraint eval (bytecode VM, warp-cooperative), GPU leaf hashing (Blake2s, domain separation), CASM loader, Cairo hints (AllocSegment, AllocFelt252Dict, dict entry lifecycle, squash, U256InvModN with 7 comprehensive test vectors), Fiat-Shamir transcript ordering (12 commitment points), property tests (completeness, soundness, random mutations), cross-validation (reference VM comparison for 9 program types).
+396 lib + 49 vortex-cuda-backend + 35 integration = **480 total (480 pass, 0 fail, 5 marked `#[ignore]` for benchmark/live-RPC opt-in)** covering: M31/CM31/QM31 field arithmetic, Circle NTT, Merkle tree (commit, auth paths, tiled, SoA4), FRI (fold, circle fold, deterministic), STARK prover + verifier (multiple sizes, tamper detection), Cairo VM (decoder, executor, Fibonacci, constraints, LogUp, range checks, instruction decomposition), Poseidon, Pedersen (Stark252 field, EC ops, GPU vs CPU), Bitwise (memory segment, trace generation, verifier native recompute against Fiat-Shamir-bound (x, y), prove/verify round-trip, tamper detection, 32-bit input acceptance, forged-row rejection), LogUp/RC soundness (memory table commitment, cancellation check, RC counts commitment), OODS quotient formula correctness, GPU constraint eval (bytecode VM, warp-cooperative), GPU leaf hashing (Blake2s, domain separation), CASM loader, Cairo hints (AllocSegment, AllocFelt252Dict, dict entry lifecycle, squash, U256InvModN with 7 comprehensive test vectors), Fiat-Shamir transcript ordering (12 commitment points), property tests (completeness, soundness, random mutations), cross-validation (reference VM comparison for 9 program types).
 
 ## Break This System
 
@@ -228,6 +228,11 @@ These should **not** break. If they do, that's a real soundness bug:
 | `test_cairo_prove_verify_tampered_fri` | Corrupt FRI value | REJECTED |
 | `test_tamper_ec_trace` | Corrupt EC trace commitment | REJECTED |
 | `test_soundness_oods_quotient_tamper` | Corrupt OODS quotient decommitment value | REJECTED |
+| `test_cairo_prove_verify_tampered_commitment` | Corrupt trace commitment root | REJECTED |
+| `test_tamper_trace_auth_paths` | Corrupt trace Merkle auth-path | REJECTED |
+| `test_tamper_ec_trace_auth_paths` | Corrupt EC trace Merkle auth-path | REJECTED |
+| `test_tamper_interaction_decommitment` | Corrupt LogUp interaction decommit value | REJECTED |
+| `test_tamper_rc_interaction_decommitment` | Corrupt RC interaction decommit value | REJECTED |
 
 ## Use as a Stwo CudaBackend
 
@@ -238,18 +243,30 @@ upstream [`stwo`](https://github.com/starkware-libs/stwo) crate (via
 [`garrick247/stwo-fork`](https://github.com/garrick247/stwo-fork) for the
 PoC trait extensions).
 
-End-to-end measured on stwo-cairo's `test_data/test_prove_verify_*`
-programs (RTX 5090 + Core Ultra 9 285K, warm prove vs CPU SimdBackend):
+End-to-end measured on stwo-cairo's 12 shipped `test_data/`
+programs (RTX 5090 + Core Ultra 9 285K, warm prove vs CPU SimdBackend
+with `target-cpu=native`):
 
-| Program | CUDA warm | CPU | Speedup |
+| Program | CPU warm | CUDA warm | Speedup |
 |---|---:|---:|---:|
-| ret_opcode | 0.73s | 4.17s | **5.7x** |
-| range_check_bits_128 | 1.18s | 4.24s | **3.6x** |
-| bitwise_builtin | 1.24s | 4.32s | **3.5x** |
-| pedersen_builtin | 5.37s | 7.65s | **1.4x** |
+| `test_prove_verify_ret_opcode`            | 3.08 s | 0.368 s | **8.4x** |
+| `test_prove_verify_bitwise_builtin`       | 3.12 s | 0.395 s | **7.9x** |
+| `test_prove_verify_range_check_bits_128`  | 3.08 s | 0.400 s | **7.7x** |
+| `test_prove_verify_range_check_bits_96`   | 2.93 s | 0.395 s | **7.4x** |
+| `test_prove_verify_add_mod_builtin`       | 2.88 s | 0.403 s | **7.2x** |
+| `test_prove_verify_poseidon_builtin`      | 3.31 s | 0.482 s | **6.9x** |
+| `test_prove_verify_mul_mod_builtin`       | 2.90 s | 0.445 s | **6.5x** |
+| `test_poseidon_aggregator`                | 2.83 s | 0.469 s | **6.0x** |
+| `test_prove_verify_all_opcode_components` | 2.89 s | 0.583 s | **5.0x** |
+| `test_prove_verify_pedersen_builtin`      | 5.37 s | 1.523 s | **3.5x** |
+| `test_pedersen_aggregator`                | 5.34 s | 1.504 s | **3.5x** |
+| `test_prove_verify_all_builtins`          | 5.64 s | 2.057 s | **2.7x** |
 
-All four produce **byte-identical proofs** to the CPU SimdBackend and
-verify via `verify_cairo_ex`.
+**Median 6.7x, range 2.7x – 8.4x.** All 12 programs produce
+**byte-identical proofs** to the CPU SimdBackend and verify via
+`verify_cairo_ex`. Reproducible measurement protocol and per-PR
+attribution in [BENCHMARKS.md](BENCHMARKS.md) (commit `f4d2bb6`, sweep
+dated 2026-05-14).
 
 To prove a Cairo program with this backend, see the
 [`cuda-backend-poc` branch of stwo-cairo](https://github.com/garrick247/stwo-cairo/tree/cuda-backend-poc),
