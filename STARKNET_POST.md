@@ -100,16 +100,19 @@ Proofs are submittable directly to Starknet's on-chain verifier.
 
 ## What's Not Yet
 
-- **Felt252 in dicts**: AIR-level dict columns are M31; the 2026-04-23
-  Phase 2 work shipped a Blake2s-committed `dict_side_table` (pointer +
-  9 M31 limbs each for key/prev/new) plus a syscall-routed
-  `felt_overlay` so values from full-felt syscall data round-trip
-  bit-exact at 252 bits. Direct in-program dict writes that bypass the
-  syscall path still reduce mod M31 at the AIR boundary. See
-  `FELT252_DESIGN.md` for the full plan and current per-checkbox state;
-  Phase 3 (a targeted side-table tamper test + an end-to-end Cairo 1
-  contract test against `LegacyMap<felt252, felt252>`) and Phase 4
-  (external audit + deployment) remain.
+- **Felt252 in dicts (largely done)**: AIR-level dict columns are M31, but
+  the Phase 2 `dict_side_table` (Blake2s-committed, pointer + 9 M31 limbs
+  each for key/prev/new) binds full 252-bit precision at every dict
+  access. The standard Cairo 1 `Felt252Dict` hint
+  (`Felt252DictEntryUpdate` in `hints.rs:1132`) pushes to both the u64
+  log AND the felt log on every write — whether the value came from a
+  syscall lift or direct in-program code — so any normal Cairo 1
+  program that uses `Felt252Dict<felt252, felt252>` round-trips bit-exact
+  through the proof. Three side-table tamper tests pass. The remaining
+  Phase 3 item is a monolithic Scarb-compiled `LegacyMap<felt252,
+  felt252>` end-to-end test (covered today by two-half composition: hint
+  executor + prover-packaging tests). Phase 4 (external audit) is the
+  remaining gating item for production use.
 - **Cairo VM prove speed**: log_n=25 measures 198s (OODS is 40%, 80s). log_n=26 OOM is closed by the chunked-slab quotient kernel (commit `7a7b2b2`, 2026-04-26): phase2 stops keeping hc-natural GPU buffers when `keep_hc_resident=false`, phase3 streams slabs through `cuda_cairo_quotient_slab`, peak GPU ≈ 4 GB per chunk. Validated up through log_n=22 forced-slab on WSL2; log_n=26 wallclock pending native-Linux measurement. Super-linear scaling in OODS, phase3_quotient, and phase5_pow_decommit remains the dominant perf issue. Profiler identifies top-3
   phases (`oods`, `ntt_blind_commit`, `phase2_logup_rc`) = 80% of prove time.
   Roadmap in `PERF_ROADMAP.md` projects 2–3× via kernel fusion, further 2–3×
@@ -145,7 +148,7 @@ with SM_120 hand-optimized kernels. Apache-2.0-converting BSL 1.1 license
 (converts 2029-03-20).
 
 Looking for:
-- Starknet Foundation grant support for the Felt252 rework and perf work
+- Starknet Foundation grant support for Phase 4 (external audit) and perf work
 - Proving-marketplace partnerships (Gevulot-style prover-node integrations)
 - Direct engagement with the stwo team on `CudaBackend` upstreaming
 
