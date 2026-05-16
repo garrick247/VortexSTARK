@@ -29,8 +29,8 @@ Source-available under [BSL 1.1](LICENSE), converts to Apache 2.0 on **2029-03-2
 - **Fibonacci STARK**: Full prove → verify pipeline, 100-bit conjectured security, 18+ tamper-detection tests
 - **Cairo VM STARK**: 34-column trace, 35 transition constraints, verifier independently evaluates all constraints at query points
 - **LogUp memory consistency**: Full cancellation check — memory table committed as explicit proof data (all unique entries), verifier independently checks exec_sum + table_sum == 0
-- **Pedersen hash**: GPU windowed EC scalar multiplication, 37.7M hashes/sec, verified against CPU reference
-- **Poseidon2 hash**: GPU trace generation + NTT, 4.7M hashes/sec at log_n=28 (30 rows/perm, RF=8 RP=22)
+- **Pedersen hash**: GPU windowed EC scalar multiplication, 40.9M hashes/sec at 1M-batch, verified against CPU reference
+- **Poseidon2 hash**: GPU trace generation + NTT, 5.7M hashes/sec at log_n=28 (30 rows/perm, RF=8 RP=22)
 - **RPO-M31 hash**: Circle STARK–native hash (eprint 2024/1635), 3.5M hashes/sec at log_n=28 (14 rows/perm, 24 cols)
 - **FRI**: Circle fold + line folds, GPU-resident decommitment, all fold equations verified
 
@@ -40,17 +40,19 @@ Default build, `BLOWUP_BITS=2`, 160-bit security, N_QUERIES=80, PoW=26 bits:
 
 | Workload | Scale | Prove | Verify |
 |----------|-------|-------|--------|
-| Fibonacci log_n=24 | 16.8M elements | 214ms | 6.2ms |
-| Fibonacci log_n=28 | 268M elements | 1.55s | 8.2ms |
-| Fibonacci log_n=29 | 537M elements | 8.9s | 7.8ms |
-| Cairo VM log_n=20 | 1M steps | 1.4s | ~0.5s |
-| Cairo VM log_n=22 | 4.2M steps | 5.0s | ~1s |
-| Cairo VM log_n=24 | 16.8M steps | 22.1s | ~3s |
+| Fibonacci log_n=24 | 16.8M elements | 133ms | 5.9ms |
+| Fibonacci log_n=28 | 268M elements | 2.52s | 7.4ms |
+| Fibonacci log_n=29 | 537M elements | currently fails (`cudaMalloc(2.1 GB)` panic on fresh process despite >30 GB VRAM free) — tracking as an allocator regression; pre-regression value was 8.9s | — |
+| Cairo VM log_n=20 | 1M steps | 1.37s | 0.11s |
+| Cairo VM log_n=22 | 4.2M steps | 5.65s | 0.39s |
+| Cairo VM log_n=24 | 16.8M steps | 23.96s | 1.80s |
 | Cairo VM log_n=25 | 33.5M steps | 80s | ~5s |
 | Cairo VM log_n=26 | 67M steps | runs via chunked-slab quotient kernel (commit `7a7b2b2`); requires ≥40 GB host RAM for the parallel `cn`/`hc` host copies. Native-Linux wallclock TBD — WSL2's 31 GB host ceiling caps in-house validation at log_n=22 | — |
-| Poseidon2 trace+NTT log_n=28 | 8.9M hashes | 1.92s | — |
-| RPO-M31 trace+NTT log_n=28 | 19.2M hashes | 5.51s | — |
-| Pedersen GPU batch | 1M hashes | 26.6ms | — |
+| Poseidon2 trace+NTT log_n=28 | 8.9M hashes | 1.57s | — |
+| RPO-M31 trace+NTT log_n=28 | 19.2M hashes | 5.51s* | — |
+| Pedersen GPU batch | 1M hashes | 25.7ms | — |
+
+\* RPO-M31 log_n=28 currently fails on fresh process (same `cudaMalloc` regression as Fibonacci log_n=29); value shown is the last known measurement. RPO-M31 log_n=24 measured today at 5.55M hashes/sec.
 
 `bench-max-size` feature build (`cargo build --release --features bench-max-size`),
 `BLOWUP_BITS=1`, 80-bit security — used to measure the 1B-element headline, which
@@ -67,6 +69,8 @@ On WSL2 this works on systems with enough allocated to the VM; native Linux is
 recommended for the headline measurement.
 
 All Cairo VM numbers include 34 columns, 35 constraints, full LogUp+RC memory table, S_dict LogUp, OODS quotient, and 26-bit proof-of-work. Fibonacci numbers are the standalone single-column prover.
+
+Default-build numbers above re-measured 2026-05-16 via fresh-process-per-size warm-iterate harness (cold + warm prove, warm time reported). Cairo VM log_n=25 and bench-max-size headlines retained from prior measurement; flag if these need re-validation.
 
 ### Adversarial soundness (constraint coverage)
 
